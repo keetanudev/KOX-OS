@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# kox-lock: KOX OS session lock entry point (Super+Ctrl+L).
+#
+# Primary: the KOX lockscreen — quickshell/QML at
+# ~/.config/quickshell/lock.qml (WlSessionLock + PamContext, thin clock +
+# password pill). PAM policy is user-owned at
+# ~/.config/quickshell/pam/lock.conf (auth required pam_unix.so — no
+# /etc/pam.d change). On-demand by design: the keybind spawns this script,
+# quickshell engages the session lock, a successful PAM auth unlocks and
+# quickshell exits. No resident daemon, zero idle RAM.
+#
+# Fallback: if quickshell is missing, lock.qml is missing, or quickshell
+# exits non-zero, drop to the rice's stock hyprlock
+# (~/.config/hypr/hyprlock.conf) so the session is never left unlocked.
+set -u
+LOCK_QML="$HOME/.config/quickshell/lock.qml"
+
+if command -v quickshell >/dev/null 2>&1 && [ -f "$LOCK_QML" ]; then
+    quickshell -p "$LOCK_QML"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        exit 0
+    fi
+    echo "kox-lock: quickshell lockscreen exited rc=$rc; falling back to hyprlock" >&2
+fi
+
+exec hyprlock

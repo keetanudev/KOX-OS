@@ -196,11 +196,14 @@ safe_bind(mainMod .. " + CTRL + SHIFT + C", hl.dsp.exec_cmd("cachy-cursor"))
 -- Bar style selector (extra beyond Omarchy parity): switches the Waybar
 -- layout/look between the styles in ~/.config/waybar/styles.
 safe_bind(mainMod .. " + CTRL + SHIFT + B", hl.dsp.exec_cmd("cachy-bar"))
--- Lock the session with the Ryoku orbital clock lockscreen (quickshell).
--- cachy-lock runs the orbital QML lock and falls back to the rice's stock
--- hyprlock (~/.config/hypr/hyprlock.conf) if the bundle is unavailable.
--- Wired 2026-10-20; previous bind was plain `hyprlock`.
-safe_bind(mainMod .. " + CTRL + L", hl.dsp.exec_cmd("cachy-lock"))
+-- Lock the session with the KOX lockscreen (quickshell): WlSessionLock +
+-- PAM clock/password UI in ~/.config/quickshell/lock.qml, spawned on
+-- demand by kox-lock (no resident daemon). kox-lock falls back to the
+-- rice's stock hyprlock (~/.config/hypr/hyprlock.conf) if quickshell is
+-- missing or fails to start.
+-- Wired 2026-11-12; previous bind was `cachy-lock` (Ryoku orbital, whose
+-- bundle no longer exists), before that plain `hyprlock`.
+safe_bind(mainMod .. " + CTRL + L", hl.dsp.exec_cmd("kox-lock"))
 -- Zoom in/out (same idea as Omarchy cursor zoom)
 if hl.get_config then
   safe_bind(mainMod .. " + CTRL + Z", function()
