@@ -1,2 +1,1 @@
-# KOX-OS
-A hyper-lean, modular Hyprland desktop platform built on Artix Linux. Engineered for zero-lag scaling, absolute fluidity, and total control—without systemd or monolithic shells.
+KOX OS is a lightweight, independently developed Linux desktop platform built on Artix Linux (OpenRC) and Hyprland. Designed as a faster, more modular alternative to Omarchy, KOX OS strips away monolithic shells and systemd dependencies in favor of a bespoke, component-driven architecture. It features a custom floating Waybar, interactive GTK system panels, and a proprietary kox-scale engine that delivers instant, fluid UI scaling with absolutely zero compositor lag.
