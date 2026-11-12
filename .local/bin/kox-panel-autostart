@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Start kox-panel --daemon once a Wayland compositor has created its runtime
+# socket. Same shape and same reason as cachy-waybar-autostart: a launcher may
+# start before Hyprland is ready or without the compositor's environment
+# (notably WAYLAND_DISPLAY and the Hyprland instance signature), both of which
+# GTK layer-shell and the focus watcher need.
+set -u
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin${PATH:+:$PATH}"
+
+runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export XDG_RUNTIME_DIR="$runtime_dir"
+shopt -s nullglob
+
+# Same signature-discovery logic as cachy-waybar-autostart: glob the instance
+# socket directory (no subprocess), fall back to `hyprctl instances -j`.
+discover_signature() {
+  local sock sig
+  for sock in "$runtime_dir"/hypr/*/.socket.sock; do
+    [[ -S "$sock" ]] || continue
+    sig="${sock%/.socket.sock}"
+    printf '%s' "${sig##*/}"
+    return 0
+  done
+  hyprctl instances -j 2>/dev/null |
+    python3 -c 'import json,sys;d=json.load(sys.stdin);print(d[0].get("instance","") if d else "")' 2>/dev/null ||
+    true
+}
+
+waited=0
+while :; do
+  for socket in "$runtime_dir"/wayland-*; do
+    if [[ -S "$socket" ]]; then
+      export WAYLAND_DISPLAY="${socket##*/}"
+      export XDG_CURRENT_DESKTOP="Hyprland"
+      export XDG_SESSION_DESKTOP="Hyprland"
+      export XDG_SESSION_TYPE="wayland"
+
+      if [[ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]]; then
+        while (( waited < 30 )); do
+          HYPRLAND_INSTANCE_SIGNATURE="$(discover_signature)"
+          [[ -n "$HYPRLAND_INSTANCE_SIGNATURE" ]] && break
+          sleep 0.2
+          waited=$((waited + 1))
+        done
+        export HYPRLAND_INSTANCE_SIGNATURE
+      fi
+      exec kox-panel --daemon
+    fi
+  done
+  sleep 1
+done

@@ -1,0 +1,397 @@
+#!/usr/bin/env bash
+# kox-scale: KOX OS UI type scale.
+#
+# Single state: ~/.config/kox/ui-scale (integer 9-20, reference 11 = the KOX
+# baseline). Every consumer is scaled from its reference value with
+# round(ref * scale / 11) so scale 11 reproduces today's exact look.
+#
+# Design contract (zero compositor lag, learned from the old rice's
+# cachy-ui-scale):
+#   - Hyprland is NEVER touched at apply time: no hyprctl reload, no monitor
+#     keywords, no setcursor, no env pushes. Monitor scale stays in
+#     monitors.lua; a scale change here is invisible to the compositor.
+#   - No fractional toolkit factors on busy surfaces: Waybar and the panel
+#     scale through integer px CSS (pango glyph-cache fast path); kitty and
+#     fuzzel scale through their own native font settings. The only
+#     fractional factor left is the generic-GTK text-scaling-factor, and it
+#     is read-first so it is written only when it actually changes.
+#   - No daemons, no polling: one-shot apply, write-if-changed everywhere,
+#     targeted signals only for consumers whose bytes changed. A repeat
+#     apply of the current scale is a byte-level no-op that returns fast.
+#
+# Consumers:
+#   Waybar     ~/.config/waybar/theme-scale.css (imported by style.css)
+#              + surgical "height" edit in config.jsonc.
+#              CSS-only change -> SIGUSR2 (surface preserved, no relayout of
+#              the desktop); bar-height change -> one process restart.
+#   kox-panel  ~/.config/kox-panel/scale.css + SIGHUP -> warm CSS-provider
+#              swap (the daemon already implements the SIGHUP handler).
+#   Kitty      font_size in kitty.conf + live `kitty @ set-font-size` over
+#              the remote-control socket (best effort; needs a kitty that
+#              was started with allow_remote_control, see kitty.conf).
+#   Fuzzel     :size= in fuzzel.ini; fuzzel re-reads its config at every
+#              launch, so the next invocation simply uses it.
+#   Mako       font size in config + `makoctl reload` when it changed.
+#   Generic GTK gsettings text-scaling-factor, quantized from the default
+#              font's pt size, read-first skip-if-equal.
+#
+# Usage: kox-scale <9-20|current|reset>
+set -u
+
+STATE_DIR="$HOME/.config/kox"
+SCALE_STATE="$STATE_DIR/ui-scale"
+WAYBAR_DIR="$HOME/.config/waybar"
+WAYBAR_STYLE="$WAYBAR_DIR/style.css"
+WAYBAR_SCALE="$WAYBAR_DIR/theme-scale.css"
+WAYBAR_CONFIG="$WAYBAR_DIR/config.jsonc"
+PANEL_SCALE="$HOME/.config/kox-panel/scale.css"
+KITTY_CONFIG="$HOME/.config/kitty/kitty.conf"
+FUZZEL_CONFIG="$HOME/.config/fuzzel/fuzzel.ini"
+MAKO_CONFIG="$HOME/.config/mako/config"
+KITTY_SOCKET="unix:@kox-kitty"
+
+MIN_SCALE=9
+MAX_SCALE=20
+REFERENCE_SCALE=11          # the KOX baseline = current pixel values
+WAYBAR_HEIGHT_REF=26
+KITTY_PT_REF=9              # font_size in kitty.conf
+FUZZEL_REF=13               # :size= in fuzzel.ini
+MAKO_REF=11                 # trailing size in mako font=
+# panel class : reference px (from the panel's built-in CSS)
+PANEL_REFS=(
+    ".panel:11" ".hdr-icon:21" ".hdr-title:14" ".hdr-sub:9"
+    "button.sq:14" ".section:9" "button.flat:12" "button.pill:10"
+    ".row-icon:13" ".row-name:12" ".row-sub:10" ".row-trail:12"
+    ".hint:10" "entry:11"
+)
+
+T0=$(date +%s%N)
+
+round_ref() {  # round(ref * scale / 11); 11 is odd so integer math is exact
+    echo $(( ($1 * $2 + 5) / REFERENCE_SCALE ))
+}
+
+valid_scale() {
+    [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= MIN_SCALE && $1 <= MAX_SCALE ))
+}
+
+read_scale() {
+    local scale
+    if [[ -r "$SCALE_STATE" ]]; then
+        read -r scale < "$SCALE_STATE" || true
+    fi
+    if valid_scale "${scale:-}"; then
+        printf '%s\n' "$scale"
+    else
+        printf '%s\n' "$REFERENCE_SCALE"
+    fi
+}
+
+# Atomic write-if-changed: stdout goes to $1; returns 0 when bytes changed.
+write_if_changed() {
+    local destination=$1
+    local temporary
+    mkdir -p "$(dirname "$destination")" 2>/dev/null || return 1
+    temporary="$(mktemp "${destination}.tmp.XXXXXX")" || return 1
+    cat > "$temporary" || { rm -f "$temporary"; return 1; }
+    if [[ -f "$destination" ]] && cmp -s "$temporary" "$destination"; then
+        rm -f "$temporary"
+        return 1
+    fi
+    if [[ -e "$destination" ]]; then
+        chmod --reference="$destination" "$temporary" 2>/dev/null || true
+    else
+        chmod 644 "$temporary"
+    fi
+    mv -f "$temporary" "$destination"
+    return 0
+}
+
+# One-time self-heal: style.css must import theme-scale.css and must not pin
+# its own window#waybar font-size (the generated file owns it). Idempotent.
+ensure_waybar_style() {
+    grep -q '@import url("theme-scale.css")' "$WAYBAR_STYLE" 2>/dev/null \
+        && return 1
+    [[ -f "$WAYBAR_STYLE" ]] || return 1
+    local temporary
+    temporary="$(mktemp "${WAYBAR_STYLE}.tmp.XXXXXX")"
+    {
+        printf '@import url("theme-scale.css");\n'
+        # first-match delete of the hard-coded font-size inside window#waybar
+        sed '0,/^    font-size: [0-9]\+px;$/s///' "$WAYBAR_STYLE"
+    } > "$temporary"
+    chmod --reference="$WAYBAR_STYLE" "$temporary" 2>/dev/null || true
+    mv -f "$temporary" "$WAYBAR_STYLE"
+    return 0
+}
+
+generate_waybar_scale() {
+    local scale=$1
+    write_if_changed "$WAYBAR_SCALE" <<EOF
+/* Generated by kox-scale from ~/.config/kox/ui-scale.
+   Imported by style.css; do not edit. */
+window#waybar {
+    font-size: $(round_ref 11 "$scale")px;
+}
+EOF
+}
+
+waybar_height_changed() {
+    local scale=$1
+    local target current
+    target=$(round_ref "$WAYBAR_HEIGHT_REF" "$scale")
+    current=$(grep -oE '"height":[[:space:]]*[0-9]+' "$WAYBAR_CONFIG" 2>/dev/null |
+        grep -oE '[0-9]+' | head -n 1)
+    [[ "$current" == "$target" ]] && return 1
+    [[ -f "$WAYBAR_CONFIG" ]] || return 1
+    local temporary
+    temporary="$(mktemp "${WAYBAR_CONFIG}.tmp.XXXXXX")"
+    sed -E "s/^([[:space:]]*\"height\":[[:space:]]*)[0-9]+/\1$target/" \
+        "$WAYBAR_CONFIG" > "$temporary"
+    if cmp -s "$temporary" "$WAYBAR_CONFIG"; then
+        rm -f "$temporary"
+        return 1
+    fi
+    chmod --reference="$WAYBAR_CONFIG" "$temporary" 2>/dev/null || true
+    mv -f "$temporary" "$WAYBAR_CONFIG"
+    return 0
+}
+
+generate_panel_scale() {
+    local scale=$1 line
+    {
+        printf '/* Generated by kox-scale from ~/.config/kox/ui-scale.\n'
+        printf '   Loaded after style.css; do not edit. */\n'
+        for line in "${PANEL_REFS[@]}"; do
+            printf '%s { font-size: %spx; }\n' \
+                "${line%%:*}" "$(round_ref "${line##*:}" "$scale")"
+        done
+    } | write_if_changed "$PANEL_SCALE"
+}
+
+apply_kitty() {
+    local scale=$1
+    local target current
+    target="$(round_ref "$KITTY_PT_REF" "$scale").0"
+    current=$(grep -E '^font_size[[:space:]]' "$KITTY_CONFIG" 2>/dev/null |
+        awk '{print $2}')
+    [[ "$current" == "$target" ]] && return 1
+    [[ -f "$KITTY_CONFIG" ]] || return 1
+    local temporary
+    temporary="$(mktemp "${KITTY_CONFIG}.tmp.XXXXXX")"
+    sed -E "s/^font_size[[:space:]]+[0-9.]+[[:space:]]*\$/font_size $target/" \
+        "$KITTY_CONFIG" > "$temporary"
+    if cmp -s "$temporary" "$KITTY_CONFIG"; then
+        rm -f "$temporary"
+        return 1
+    fi
+    chmod --reference="$KITTY_CONFIG" "$temporary" 2>/dev/null || true
+    mv -f "$temporary" "$KITTY_CONFIG"
+    # Live leg: best effort. A kitty started before allow_remote_control
+    # existed has no listening socket; fall back to a config-reload signal.
+    if pgrep -x kitty >/dev/null 2>&1; then
+        if kitty @ --to "$KITTY_SOCKET" set-font-size --all "${target%.0}" \
+            >/dev/null 2>&1; then
+            KITTY_LIVE="socket"
+        else
+            kill -USR1 $(pgrep -x kitty | head -n 1) 2>/dev/null || true
+            KITTY_LIVE="config-reload"
+        fi
+    fi
+    return 0
+}
+
+apply_fuzzel() {
+    local scale=$1
+    local target current
+    target=$(round_ref "$FUZZEL_REF" "$scale")
+    current=$(grep -m1 -E '^font[[:space:]]*=' "$FUZZEL_CONFIG" 2>/dev/null |
+        grep -oE 'size=[0-9]+' | head -n 1 | cut -d= -f2)
+    [[ "$current" == "$target" ]] && return 1
+    [[ -f "$FUZZEL_CONFIG" ]] || return 1
+    local temporary
+    temporary="$(mktemp "${FUZZEL_CONFIG}.tmp.XXXXXX")"
+    sed -E "s/^(font[[:space:]]*=[[:space:]]*.*:size=)[0-9]+/\1$target/" \
+        "$FUZZEL_CONFIG" > "$temporary"
+    if cmp -s "$temporary" "$FUZZEL_CONFIG"; then
+        rm -f "$temporary"
+        return 1
+    fi
+    chmod --reference="$FUZZEL_CONFIG" "$temporary" 2>/dev/null || true
+    mv -f "$temporary" "$FUZZEL_CONFIG"
+    return 0
+}
+
+apply_mako() {
+    local scale=$1
+    local target current
+    target=$(round_ref "$MAKO_REF" "$scale")
+    current=$(grep -m1 -E '^font[[:space:]]*=' "$MAKO_CONFIG" 2>/dev/null |
+        sed -E 's/^[^=]*=[[:space:]]*//' | awk '{print $NF}')
+    [[ "$current" == "$target" ]] && return 1
+    [[ -f "$MAKO_CONFIG" ]] || return 1
+    local temporary
+    temporary="$(mktemp "${MAKO_CONFIG}.tmp.XXXXXX")"
+    sed -E "s/^(font[[:space:]]*=[[:space:]]*.*[[:space:]])[0-9]+([[:space:]]*)\$/\1$target\2/" \
+        "$MAKO_CONFIG" > "$temporary"
+    if cmp -s "$temporary" "$MAKO_CONFIG"; then
+        rm -f "$temporary"
+        return 1
+    fi
+    chmod --reference="$MAKO_CONFIG" "$temporary" 2>/dev/null || true
+    mv -f "$temporary" "$MAKO_CONFIG"
+    if pgrep -x mako >/dev/null 2>&1 && command -v makoctl >/dev/null 2>&1; then
+        makoctl reload >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
+# Generic-GTK leg: quantized text-scaling-factor, read-first skip-if-equal.
+apply_gtk() {
+    local scale=$1
+    local font factor_pt whole factor current
+    font=$(gsettings get org.gnome.desktop.interface font-name 2>/dev/null ||
+        printf "''")
+    factor_pt="${font%\'}"    # strip trailing quote
+    factor_pt="${factor_pt##* }"
+    [[ "$factor_pt" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
+    whole=$(awk -v p="$factor_pt" -v s="$scale" -v r="$REFERENCE_SCALE" \
+        'BEGIN { printf "%d", int(p * s / r + 0.5) }')
+    factor=$(awk -v w="$whole" -v p="$factor_pt" \
+        'BEGIN { printf "%.4f", w / p }')
+    current=$(gsettings get org.gnome.desktop.interface text-scaling-factor \
+        2>/dev/null || printf "")
+    if [[ -n "$current" ]] &&
+        awk -v c="$current" -v t="$factor" \
+            'BEGIN { exit !(sprintf("%.4f", c) == t) }'; then
+        GTK_FACTOR="$factor"
+        return 1
+    fi
+    gsettings set org.gnome.desktop.interface text-scaling-factor "$factor" \
+        >/dev/null 2>&1 || return 1
+    GTK_FACTOR="$factor"
+    return 0
+}
+
+reload_panel() {
+    local pid
+    for pid in $(pgrep -f '[k]ox-panel --daemon' 2>/dev/null); do
+        kill -HUP "$pid" 2>/dev/null || true
+    done
+}
+
+restart_waybar() {
+    if ! pgrep -x waybar >/dev/null 2>&1; then
+        return 1
+    fi
+    pkill -x waybar 2>/dev/null || true
+    sleep 0.25
+    ( setsid waybar >/tmp/kox-waybar.log 2>&1 < /dev/null & )
+    sleep 0.35
+    pgrep -x waybar >/dev/null 2>&1
+}
+
+print_current() {
+    local scale factor_pt font factor
+    scale=$(read_scale)
+    font=$(gsettings get org.gnome.desktop.interface font-name 2>/dev/null ||
+        printf "''")
+    factor_pt="${font%\'}"; factor_pt="${factor_pt##* }"
+    if [[ "$factor_pt" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        factor=$(awk -v p="$factor_pt" -v s="$scale" -v r="$REFERENCE_SCALE" \
+            'BEGIN { printf "%.4f", int(p * s / r + 0.5) / p }')
+    else
+        factor="n/a"
+    fi
+    printf 'UI scale: %s (reference %s; monitor scale untouched)\n' \
+        "$scale" "$REFERENCE_SCALE"
+    printf '  Waybar:  body %spx, bar height %spx\n' \
+        "$(round_ref 11 "$scale")" "$(round_ref "$WAYBAR_HEIGHT_REF" "$scale")"
+    printf '  Panel:   body %spx, hdr-icon %spx (%s classes)\n' \
+        "$(round_ref 11 "$scale")" "$(round_ref 21 "$scale")" \
+        "${#PANEL_REFS[@]}"
+    printf '  Kitty:   %spt   Fuzzel: %spt   Mako: %spt\n' \
+        "$(round_ref "$KITTY_PT_REF" "$scale")" \
+        "$(round_ref "$FUZZEL_REF" "$scale")" \
+        "$(round_ref "$MAKO_REF" "$scale")"
+    printf '  GTK text-scaling-factor: %s (font %s)\n' "$factor" "$font"
+    [[ -r "$SCALE_STATE" ]] ||
+        printf '  (state file missing - scale %s is the built-in default)\n' "$scale"
+}
+
+apply() {
+    local scale=$1
+    local style_changed=0 css_changed=0 height_changed=0 panel_changed=0
+    local kitty_changed=0 fuzzel_changed=0 mako_changed=0 gtk_changed=0
+    KITTY_LIVE=""
+
+    mkdir -p "$STATE_DIR"
+
+    ensure_waybar_style && style_changed=1
+    generate_waybar_scale "$scale" && css_changed=1
+    waybar_height_changed "$scale" && height_changed=1
+    generate_panel_scale "$scale" && panel_changed=1
+    apply_kitty "$scale" && kitty_changed=1
+    apply_fuzzel "$scale" && fuzzel_changed=1
+    apply_mako "$scale" && mako_changed=1
+    apply_gtk "$scale" && gtk_changed=1
+
+    # State last: a failed consumer write must not corrupt the state.
+    if printf '%s\n' "$scale" | write_if_changed "$SCALE_STATE"; then
+        : # first install counts as a write but needs no signal
+    fi
+
+    if (( height_changed )); then
+        if restart_waybar; then
+            printf 'Waybar: restarted (bar height %s)\n' \
+                "$(round_ref "$WAYBAR_HEIGHT_REF" "$scale")"
+        else
+            printf 'Waybar: height %s written (restart waybar to apply)\n' \
+                "$(round_ref "$WAYBAR_HEIGHT_REF" "$scale")"
+        fi
+    elif (( css_changed || style_changed )); then
+        if pgrep -x waybar >/dev/null 2>&1; then
+            pkill -USR2 -x waybar 2>/dev/null || true
+            printf 'Waybar: CSS reloaded (SIGUSR2)\n'
+        fi
+    fi
+    if (( panel_changed )); then
+        reload_panel
+        printf 'Panel: scale.css swapped (SIGHUP, warm daemon)\n'
+    fi
+    (( kitty_changed )) && printf 'Kitty: font_size %s (%s)\n' \
+        "$(round_ref "$KITTY_PT_REF" "$scale").0" \
+        "${KITTY_LIVE:-config only}"
+    (( fuzzel_changed )) && printf 'Fuzzel: size %s (next launch)\n' \
+        "$(round_ref "$FUZZEL_REF" "$scale")"
+    (( mako_changed )) && printf 'Mako: size %s (reloaded)\n' \
+        "$(round_ref "$MAKO_REF" "$scale")"
+    (( gtk_changed )) && printf 'GTK: text-scaling-factor %s\n' "$GTK_FACTOR"
+
+    if (( style_changed + css_changed + height_changed + panel_changed +
+          kitty_changed + fuzzel_changed + mako_changed + gtk_changed == 0 )); then
+        printf 'UI scale %s: already applied - no files touched, no signals\n' "$scale"
+    fi
+    printf 'Apply time: %d ms\n' $(( ($(date +%s%N) - T0) / 1000000 ))
+}
+
+case "${1:-}" in
+    current)
+        print_current
+        ;;
+    reset)
+        apply "$REFERENCE_SCALE"
+        ;;
+    '')
+        printf 'Usage: kox-scale <%s-%s|current|reset>\n' "$MIN_SCALE" "$MAX_SCALE" >&2
+        exit 2
+        ;;
+    *)
+        if ! valid_scale "$1"; then
+            printf 'Invalid UI scale: %s (supported integer range: %s-%s)\n' \
+                "$1" "$MIN_SCALE" "$MAX_SCALE" >&2
+            exit 2
+        fi
+        apply "$1"
+        ;;
+esac

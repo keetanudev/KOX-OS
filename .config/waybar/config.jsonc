@@ -1,0 +1,63 @@
+// KOX OS — ultra-thin island bar
+// custom/{wifi,bluetooth,battery} poll at 5 s per the owner's explicit
+// request (2026-11-11); everything else is native/event-driven.
+{
+    "layer": "top",
+    "position": "top",
+    "height": 26,
+    "spacing": 0,
+    "margin-top": 0,
+    "margin-bottom": 0,
+    "margin-left": 0,
+    "margin-right": 0,
+
+    "modules-left": [],
+    "modules-center": ["hyprland/workspaces", "clock", "custom/wifi", "custom/bluetooth", "pulseaudio", "custom/battery", "custom/power"],
+    "modules-right": [],
+
+    "hyprland/workspaces": {},
+
+    "clock": {
+        "format": "{:%H:%M}"
+    },
+
+    "custom/wifi": {
+        "exec": "~/.local/bin/kox/kox-wifi",
+        "return-type": "json",
+        "interval": 5,
+        "on-click": "~/.local/bin/kox-panel wifi",
+        "on-click-right": "~/.local/bin/kox/kox-wifi toggle",
+        "tooltip": true
+    },
+
+    "custom/bluetooth": {
+        "exec": "~/.local/bin/kox/kox-bluetooth",
+        "return-type": "json",
+        "interval": 5,
+        "on-click": "~/.local/bin/kox-panel bluetooth",
+        "on-click-right": "~/.local/bin/kox/kox-bluetooth toggle",
+        "tooltip": true
+    },
+
+    "custom/battery": {
+        "exec": "~/.local/bin/kox/kox-power",
+        "return-type": "json",
+        "interval": 5,
+        "on-click": "~/.local/bin/kox-panel battery",
+        "tooltip": true
+    },
+
+    "pulseaudio": {
+        "format": "{icon}",
+        "format-muted": "󰝟",
+        "format-icons": {
+            "default": "󰕾"
+        },
+        "on-click": "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
+    },
+
+    "custom/power": {
+        "format": "",
+        "on-click": "~/.local/bin/cachy-powermenu"
+    }
+}

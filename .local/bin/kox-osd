@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+"""kox-osd - KOX OS volume indicator.
+
+Minimal: a thin white bar, no background, no icon. Event-driven with zero
+polling - one `pactl subscribe` stream (a helper thread) notices every
+default-sink volume/mute change from anything (volume knob, cachy-vol keys,
+the panel's slider, mute), reads the level ON THAT THREAD so no subprocess
+or debounce sits on the UI path, and hands the value to the GTK loop.
+
+Animation is frame-synced (Gtk.add_tick_callback): the displayed fraction
+and the opacity ease toward their targets every frame, so bursts of
+key-repeat events render as one fluid fast sweep that settles in ~150ms and
+fades out smoothly instead of popping. Hides completely when idle.
+
+Layer-shell house rules: OVERLAY layer, KeyboardMode NONE + input
+pass-through - the bar can never steal a click or focus. Singleton-guarded.
+"""
+
+import os
+import re
+import signal
+import socket
+import subprocess
+import sys
+import threading
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+gi.require_version("GtkLayerShell", "0.1")
+from gi.repository import Gdk, GLib, Gtk, GtkLayerShell  # noqa: E402
+
+APP = "kox-osd"
+WIDTH = 280
+PAD = 4            # breathing room above/below the thin bar
+BAR_H = 4          # the "more thinner" indicator
+TRACK = "rgba(255, 255, 255, 0.16)"
+FILL = "#ffffff"
+FILL_MUTED = "rgba(255, 255, 255, 0.35)"
+HIDE_MS = 1600
+FRAC_TAU_MS = 50.0   # ease constants: exponential smoothing, fast settle
+OP_TAU_MS = 70.0
+
+CSS = "window.kox-osd { background: transparent; }"
+
+
+def acquire():
+    """Singleton guard: bind an abstract socket for the process lifetime."""
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.bind("\0" + APP)
+        return sock
+    except OSError:
+        return None
+
+
+def read_level():
+    """(fraction, muted) of the default sink, or None when unreadable.
+
+    Called on the watcher thread - pure subprocess + parse, no GTK."""
+    try:
+        out = subprocess.run(
+            ["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"],
+            capture_output=True, text=True, timeout=4,
+        ).stdout
+        match = re.search(r"Volume:\s*([\d.]+)", out)
+        if not match:
+            return None
+        return (min(1.0, float(match.group(1))), "MUTED" in out)
+    except Exception:
+        return None
+
+
+def _rgba(spec):
+    rgba = Gdk.RGBA()
+    rgba.parse(spec)
+    return (rgba.red, rgba.green, rgba.blue, rgba.alpha)
+
+
+def _rounded(cr, x, y, w, h, r):
+    r = min(r, h / 2.0, w / 2.0)
+    cr.new_sub_path()
+    cr.arc(x + w - r, y + r, r, -1.5708, 0)
+    cr.arc(x + w - r, y + h - r, r, 0, 1.5708)
+    cr.arc(x + r, y + h - r, r, 1.5708, 3.14159)
+    cr.arc(x + r, y + r, r, 3.14159, 4.71239)
+    cr.close_path()
+
+
+class Osd(Gtk.Window):
+    def __init__(self):
+        super().__init__(title=APP)
+        self.set_decorated(False)
+        self.set_resizable(False)
+        self.set_size_request(WIDTH, BAR_H + PAD * 2)
+        self.set_default_size(WIDTH, BAR_H + PAD * 2)
+        self.set_app_paintable(True)
+        screen = self.get_screen()
+        visual = screen.get_rgba_visual()
+        if visual:
+            self.set_visual(visual)
+        self.get_style_context().add_class(APP)
+
+        self.target = 0.0     # latest reported volume fraction
+        self.disp = 0.0       # animated fraction being drawn
+        self.muted = False
+        self.op = 0.0         # animated window opacity
+        self.op_target = 0.0
+        self.shown = False    # logical visibility (bar should be on screen)
+        self._tick_id = 0
+        self._hide_source = 0
+        self._last_frame_us = 0
+
+        GtkLayerShell.init_for_window(self)
+        GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
+        GtkLayerShell.set_namespace(self, APP)
+        # KeyboardMode NONE lets clicks fall through to whatever is below;
+        # the input region itself is cleared after mapping (pass-through).
+        GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.NONE)
+
+        self.bar = Gtk.DrawingArea()
+        self.bar.set_hexpand(True)
+        self.bar.set_vexpand(True)
+        self.bar.connect("draw", self._draw)
+        self.add(self.bar)
+
+        self.place()
+        # Realise hidden: reveal is then just show + fade-in.
+        self.show_all()
+        self.hide()
+        self.set_opacity(0.0)
+
+        self._start_watcher()
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM,
+                             lambda: (Gtk.main_quit(), False)[1])
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT,
+                             lambda: (Gtk.main_quit(), False)[1])
+
+    def place(self):
+        """Top-centre, exactly PAD+BAR_H/2-scaled gap below the bar."""
+        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.TOP, True)
+        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.LEFT, True)
+        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.RIGHT, False)
+        GtkLayerShell.set_exclusive_zone(self, -1)  # margins are exact: no
+        # auto offset from the bar's exclusive zone on top of ours.
+        try:
+            display = Gdk.Display.get_default()
+            mon = display.get_primary_monitor() or display.get_monitor(0)
+            geo = mon.get_geometry()
+            screen_w = geo.width
+        except Exception:
+            screen_w = 0
+        bar = 26
+        try:
+            with open(os.path.expanduser(
+                    "~/.config/waybar/config.jsonc")) as fh:
+                match = re.search(r'"height"\s*:\s*(\d+)', fh.read())
+            if match:
+                bar = int(match.group(1))
+        except OSError:
+            pass
+        left = max(2, (screen_w - WIDTH) // 2) if screen_w else 0
+        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.LEFT, left)
+        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.TOP, bar + 10)
+
+    def _start_watcher(self):
+        """One pactl subscribe stream on a helper thread. The volume value is
+        read ON THE THREAD (plain subprocess, no GTK): the UI path carries
+        only the parsed numbers, so the first frame lands ~15-25ms after the
+        change with no debounce in between."""
+        def work():
+            proc = subprocess.Popen(["pactl", "subscribe"],
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL, text=True)
+            for line in proc.stdout:
+                # Default-sink level and server events only; per-stream
+                # noise (sink-input/source) is ignored.
+                if "on sink #" in line or "on server" in line:
+                    level = read_level()
+                    if level is not None:
+                        GLib.idle_add(self._apply, level[0], level[1])
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply(self, frac, muted):
+        """Main thread: adopt a fresh level, reveal, animate."""
+        self.target = frac
+        self.muted = muted
+        if self._hide_source:
+            GLib.source_remove(self._hide_source)
+            self._hide_source = 0
+        if not self.shown:
+            self.shown = True
+            self.place()
+            self.show_all()
+            try:
+                if self.get_window():
+                    self.get_window().set_pass_through(True)
+            except Exception:
+                pass
+            self.op_target = 1.0
+        self._ensure_tick()
+        self._hide_source = GLib.timeout_add(HIDE_MS, self._fade_out)
+        return False
+
+    def _fade_out(self):
+        self._hide_source = 0
+        self.op_target = 0.0   # the tick eases opacity to 0, then unmaps
+        self._ensure_tick()
+        return False
+
+    def _ensure_tick(self):
+        if not self._tick_id:
+            self._last_frame_us = 0
+            self._tick_id = self.bar.add_tick_callback(self._tick)
+
+    def _tick(self, _widget, frame_clock):
+        """Frame-synced easing: display fraction and opacity chase their
+        targets with a short exponential tau - fluid under key-repeat
+        bursts, fast to settle, and the callback removes itself once both
+        are at rest."""
+        now = frame_clock.get_frame_time()
+        if not self._last_frame_us:
+            self._last_frame_us = now
+        dt_ms = max(1.0, min(100.0, (now - self._last_frame_us) / 1000.0))
+        self._last_frame_us = now
+
+        k_frac = 1.0 - pow(2.718281828, -dt_ms / FRAC_TAU_MS)
+        k_op = 1.0 - pow(2.718281828, -dt_ms / OP_TAU_MS)
+        self.disp += (self.target - self.disp) * k_frac
+        self.op += (self.op_target - self.op) * k_op
+        self.set_opacity(max(0.0, min(1.0, self.op)))
+        self.bar.queue_draw()
+
+        if abs(self.op - self.op_target) < 0.01:
+            if self.op_target == 0.0 and self.op < 0.02:
+                # fade-out finished: unmap completely, stop ticking
+                self.op = 0.0
+                self.set_opacity(0.0)
+                self.hide()
+                self.shown = False
+                self._tick_id = 0
+                return GLib.SOURCE_REMOVE
+            if self.op_target == 1.0:
+                self.op = self.op_target
+                self.set_opacity(1.0)
+                if abs(self.disp - self.target) < 0.002:
+                    self.disp = self.target
+                    self._tick_id = 0
+                    return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
+    def _draw(self, _w, cr):
+        alloc = self.bar.get_allocation()
+        w = alloc.width
+        h = alloc.height
+        radius = BAR_H / 2.0
+        y = (h - BAR_H) / 2.0
+        cr.set_source_rgba(*_rgba(TRACK))
+        _rounded(cr, 0, y, w, BAR_H, radius)
+        cr.fill()
+        spec = FILL_MUTED if self.muted else FILL
+        if self.disp > 0.001 or self.muted:
+            cr.set_source_rgba(*_rgba(spec))
+            fill_w = max(radius * 2, w * self.disp)
+            _rounded(cr, 0, y, fill_w, BAR_H, radius)
+            cr.fill()
+        return False
+
+
+def main():
+    guard = acquire()
+    if guard is None:
+        return 0  # already running
+    if not os.environ.get("WAYLAND_DISPLAY"):
+        sys.stderr.write("kox-osd: needs a Wayland session\n")
+        return 1
+    css = Gtk.CssProvider()
+    css.load_from_data(CSS.encode())
+    Gtk.StyleContext.add_provider_for_screen(
+        Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    Osd()
+    Gtk.main()
+    guard.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

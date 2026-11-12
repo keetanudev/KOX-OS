@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# KOX OS - pipewire-pulse autostart guard.
+# pipewire + wireplumber run as OpenRC user services (rc-status --user);
+# only the PulseAudio compatibility socket is missing from that tree, so it
+# starts here with the session. Guarded: a second instance would just fail
+# to bind the pulse socket and spam the log.
+set -u
+if pgrep -x pipewire-pulse >/dev/null 2>&1; then
+    exit 0
+fi
+# Wait for the pipewire core socket (user service may still be coming up).
+runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [[ -S "$runtime/pipewire-0" ]] && break
+    sleep 0.5
+done
+exec pipewire-pulse

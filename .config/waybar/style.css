@@ -1,0 +1,157 @@
+@import url("theme-scale.css");
+/* Transparent, ultra-thin bar */
+window#waybar {
+    background: transparent;
+    background-color: transparent;
+    border: none;
+    font-family: "JetBrainsMono Nerd Font", "Inter";
+
+    color: #f8f8f2;
+}
+
+window#waybar > box {
+    background: transparent;
+    background-color: transparent;
+    padding: 0;
+}
+
+* {
+    min-height: 0;
+    min-width: 0;
+}
+
+/* One centered row; the individual modules below form three visual groups. */
+.modules-center {
+    background: transparent;
+    border: none;
+    margin: 0;
+    padding: 0;
+}
+
+/* Workspace capsule. Horizontal padding lives on the buttons so the active
+   indicator can bleed all the way to the capsule edge at either end. */
+#workspaces {
+    background-color: rgba(20, 22, 28, 0.95);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 10px;
+    margin: 2px 10px 2px 0;
+    padding: 0;
+}
+
+#workspaces button {
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    min-width: 14px;
+    padding: 0 4px;
+    color: #6c7086;
+    transition: all 0.2s;
+}
+
+/* Restore the original breathing room at the ends of the capsule. */
+#workspaces button:first-child {
+    padding-left: 12px;
+}
+
+#workspaces button:last-child {
+    padding-right: 12px;
+}
+
+#workspaces button:hover {
+    color: #f8f8f2;
+}
+
+#workspaces button.active {
+    background-color: rgba(255, 255, 255, 0.1);
+    color: #ffffff;
+    font-weight: bold;
+}
+
+/* At the ends the indicator runs to the capsule wall and takes its curve
+   (outer radius 10px minus the 1px border = 9px inner radius). It never
+   rounds the side that faces the other workspaces. */
+#workspaces button.active:first-child {
+    border-top-left-radius: 9px;
+    border-bottom-left-radius: 9px;
+}
+
+#workspaces button.active:last-child {
+    border-top-right-radius: 9px;
+    border-bottom-right-radius: 9px;
+}
+
+#workspaces button.active:hover {
+    background-color: rgba(255, 255, 255, 0.16);
+}
+
+/* Center clock notch */
+#clock {
+    background-color: rgba(20, 22, 28, 0.95);
+    font-weight: bold;
+    letter-spacing: 0.5px;
+    margin: 0;
+    padding: 0 16px;
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
+    border-bottom-left-radius: 10px;
+    border-bottom-right-radius: 10px;
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+    border-left: 1px solid rgba(255,255,255,0.06);
+    border-right: 1px solid rgba(255,255,255,0.06);
+}
+
+/* Shared indicator capsule; hairline dividers separate the icons. */
+#custom-wifi,
+#custom-bluetooth,
+#pulseaudio,
+#custom-battery {
+    background-color: rgba(20, 22, 28, 0.95);
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 0;
+    margin: 2px 0;
+    padding: 0 7px;
+    transition: background-color 0.15s ease;
+}
+
+#custom-wifi {
+    color: #ffffff;
+    margin-left: 10px;
+    padding-left: 8px;
+    border-left: 1px solid rgba(255, 255, 255, 0.06);
+    border-top-left-radius: 10px;
+    border-bottom-left-radius: 10px;
+}
+
+#custom-bluetooth,
+#pulseaudio,
+#custom-battery {
+    color: #ffffff;
+    border-left: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+#custom-battery {
+    padding-right: 8px;
+    border-right: 1px solid rgba(255, 255, 255, 0.06);
+    border-top-right-radius: 10px;
+    border-bottom-right-radius: 10px;
+}
+
+#custom-power {
+    color: #ffffff;
+    background-color: rgba(20, 22, 28, 0.95);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 10px;
+    margin: 2px 0 2px 10px;
+    padding: 0 8px;
+    transition: background-color 0.15s ease;
+}
+
+/* Soft hover glow on the interactive pills. */
+#custom-wifi:hover,
+#custom-bluetooth:hover,
+#pulseaudio:hover,
+#custom-battery:hover,
+#custom-power:hover {
+    background-color: rgba(255, 255, 255, 0.07);
+}

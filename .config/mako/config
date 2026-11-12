@@ -1,0 +1,13 @@
+font=Inter 11
+background-color=#1c1e27f2
+text-color=#f8f8f2
+border-color=#ff79c6
+border-size=1
+border-radius=8
+padding=10
+margin=8
+max-visible=4
+default-timeout=5000
+layer=overlay
+width=350
+height=150

@@ -1,0 +1,2931 @@
+#!/usr/bin/env python3
+"""kox-panel - Omarchy-style dropdown panels for the Waybar status bar.
+
+Modes:
+    kox-panel bluetooth    power switch, paired devices, scan/pair
+    kox-panel wifi          power switch, known networks, scan/join
+    kox-panel battery       charge state, power profiles, brightness, volume
+
+The panel is anchored under the top bar on the right (like the Omarchy
+menus) instead of a centred fuzzy popup. The bar buttons
+(~/.local/bin/cachy-bluetooth, cachy-wifi, cachy-power) are thin wrappers
+around this, so the Waybar config needs no changes.
+
+Design notes - each of these is a bug this panel was written to avoid:
+  * Every shell-out is time-boxed: bluetoothctl/nmcli have been seen to block
+    forever, and a frozen panel is worse than an error message.
+  * State is verified after an action instead of trusting an exit code, and an
+    inconclusive check reports "couldn't confirm" rather than a false success.
+  * Regions are created once and only refilled when their content signature
+    changes, so rows never flicker, duplicate, or rebuild under the pointer.
+  * An open Wi-Fi password prompt is never rebuilt away.
+  * Only one panel exists at a time: clicking the same bar button again closes
+    it, clicking a different one swaps panels.
+  * The fuzzy CLI equivalents (cachy-*-cli) remain as a fallback.
+"""
+
+import fcntl
+import json
+import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+MODES = ("bluetooth", "wifi", "battery")
+SOCKET_ENV = "KOX_PANEL_SOCKET"
+
+
+def socket_path():
+    override = os.environ.get(SOCKET_ENV)
+    if override:
+        return override
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+    return os.path.join(runtime, "kox-panel.sock")
+
+
+def read_cursorpos():
+    """(x, y) of the pointer, or None.
+
+    Run at helper start, BEFORE any GTK import: waybar forks this process
+    the instant an icon is pressed, so the freshest available snapshot of
+    the click is what anchors the panel below the icon. Read straight from
+    Hyprland's IPC socket - forking hyprctl costs ~30ms more, and every
+    millisecond here is a millisecond the user has to sweep the mouse off
+    the icon before the snapshot lands."""
+    try:
+        sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+        if sig:
+            path = os.path.join(
+                os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"),
+                "hypr", sig, ".socket.sock")
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.settimeout(2)
+                s.connect(path)
+                s.sendall(b"cursorpos")
+                out = s.recv(128).decode(errors="replace")
+            x, y = (int(v) for v in out.replace(",", " ").split()[:2])
+            return (x, y)
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(["hyprctl", "cursorpos"], capture_output=True,
+                             text=True, timeout=2).stdout
+        x, y = (int(v) for v in out.replace(",", " ").split()[:2])
+        return (x, y)
+    except Exception:
+        return None
+
+
+def bar_anchor(click_pos):
+    """Screen x to anchor under when click_pos is a click on or near the
+    bar, else None.
+
+    The strip is the bar's height PLUS a generous slop: the snapshot is
+    taken ~25ms after the press and a quick flick already slides the
+    pointer below the bar in that time - its x still sits under the icon,
+    which is exactly where the panel belongs. Anything further away (a
+    keybind, a cursor parked mid-screen) keeps the wider fallback in
+    place(), which anchors to the bar's centre."""
+    if not click_pos:
+        return None
+    try:
+        if click_pos[1] <= bar_height() + 64:
+            return click_pos[0]
+    except Exception:
+        pass
+    return None
+
+
+def request_panel(mode, click_pos=None):
+    """Ask a running daemon to show `mode`. True when a daemon took it.
+
+    Returns False when there is no daemon (socket missing, refused or the
+    daemon died), and the caller then builds the panel the slow way. The
+    click position rides along so the daemon can anchor under the icon."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1.5)
+            sock.connect(socket_path())
+            payload = mode
+            if click_pos:
+                payload += " %d %d" % click_pos
+            sock.sendall((payload + "\n").encode())
+        return True
+    except OSError:
+        return False
+
+
+# Fast path, evaluated BEFORE the gi/GTK import below. A bar click the daemon
+# can serve must not pay ~250ms of interpreter + PyGObject startup just to
+# write five bytes to a socket: importing gi is by far the most expensive
+# thing this script does, and the click path needs none of it. This is not on
+# the user's critical path (waybar spawns on-click handlers asynchronously),
+# but it keeps the helper from lingering and leaves the CPU free for the
+# frame that is being drawn.
+_click_pos = None
+if __name__ == "__main__" and len(sys.argv) > 1:
+    _argv = sys.argv[1:]
+    if _argv[0] in MODES and "--daemon" not in _argv and "-d" not in _argv:
+        # Snapshot the click position first (see read_cursorpos): this is
+        # the icon's location, captured before the mouse can have moved on.
+        _click_pos = read_cursorpos()
+        if request_panel(_argv[0], _click_pos):
+            sys.exit(0)
+
+# A panel is a GUI: with no Wayland display there is nothing to show, and the
+# CLI fallbacks exist for that case.
+if not os.environ.get("WAYLAND_DISPLAY"):
+    sys.exit(1)
+
+try:
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("Gdk", "3.0")
+    gi.require_version("GtkLayerShell", "0.1")
+    gi.require_version("Pango", "1.0")
+    from gi.repository import Gdk, GLib, Gtk, GtkLayerShell, Pango
+except Exception as exc:  # missing gi, Pango, or layer-shell support
+    sys.stderr.write(f"kox-panel: GTK/LayerShell unavailable ({exc})\n")
+    sys.exit(1)
+
+if not GtkLayerShell.is_supported():
+    sys.stderr.write("kox-panel: gtk-layer-shell is not supported by this session\n")
+    sys.exit(1)
+
+APP = "kox-panel"
+ACCENT = "#ff79c6"
+PANEL_WIDTH = 350
+GAP = 10
+DOT = "\u00b7"  # middle dot, matches the reference panel typography
+
+# Nerd Font glyphs (Font Awesome range), verified present in the installed
+# JetBrainsMonoNL Nerd Font.
+ICONS = {
+    "bluetooth": "\uf293",
+    "wifi": "\uf1eb",
+    "battery_full": "\uf240",
+    "battery_half": "\uf242",
+    "battery_empty": "\uf244",
+    "battery_bolt": "\uf0e7",
+    "trash": "\uf1f8",
+    "refresh": "\uf021",
+    "volume": "\uf028",
+    "volume_mute": "\uf026",
+    "sun": "\uf185",
+    "check": "\uf00c",
+    "plug": "\uf1e6",
+    "play": "\uf04b",
+    "stop": "\uf04d",
+    "link": "\uf0c1",
+    "signal": "\uf012",
+    "carrot": "\uf157",
+    "adjust": "\uf042",
+    "tachometer": "\uf0e4",
+    "lock": "\uf023",
+    "qrcode": "\uf03d8",
+    # Material-Design wifi glyphs (supplementary plane), cmap-verified against
+    # JetBrainsMonoNerdFont-Regular.ttf: signal fan + off state.
+    "wifi_s1": "\U000F091F",
+    "wifi_s2": "\U000F0922",
+    "wifi_s3": "\U000F0925",
+    "wifi_s4": "\U000F0928",
+    "wifi_off": "\U000F092E",
+}
+
+# ---------------------------------------------------------------------------
+# process helpers
+# ---------------------------------------------------------------------------
+
+
+def run(cmd, timeout=6):
+    """Time-boxed subprocess -> (rc, stdout, stderr).
+
+    rc == 124 means the command was killed: callers treat that as
+    "couldn't confirm", never as success.
+    """
+    try:
+        proc = subprocess.run(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout
+        )
+        return proc.returncode, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired:
+        return 124, "", "timeout"
+    except OSError as exc:
+        return 127, "", str(exc)
+
+
+def notify(title, body):
+    run(["notify-send", title, body], timeout=4)
+
+
+def bar_height():
+    """Read the bar height from the Waybar config so the panel stays flush
+    under the bar even if its height changes later. KOX names the config
+    config.jsonc; the bare `config` name is kept as a fallback."""
+    for name in ("config.jsonc", "config"):
+        try:
+            with open(os.path.expanduser("~/.config/waybar/" + name)) as fh:
+                match = re.search(r'"height"\s*:\s*(\d+)', fh.read())
+            if match:
+                return int(match.group(1))
+        except OSError:
+            continue
+    return 24
+
+
+def waybar_rect():
+    """Live geometry of the Waybar layer surface (x, width) on the primary
+    monitor, or None when it cannot be determined. The bar may be a centered
+    notch rather than full width, so the panel aligns to the bar's right
+    edge (where its widgets live) instead of the screen's right edge."""
+    try:
+        out = subprocess.run(["hyprctl", "layers", "-j"],
+                             capture_output=True, text=True, timeout=5)
+        layers = json.loads(out.stdout)
+    except Exception:
+        return None
+    try:
+        for mon in layers.values():
+            for level in mon.get("levels", {}).values():
+                for lay in level:
+                    if lay.get("namespace") == "waybar":
+                        return (int(lay.get("x", 0)), int(lay.get("w", 0)))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return None
+
+
+def nm_fields(line, expected):
+    """Split an nmcli terse line into `expected` fields.
+
+    nmcli escapes its own ':' separator as '\\:', so a naive split(':')
+    corrupts any SSID containing a colon. Split on unescaped separators, then
+    unescape.
+    """
+    fields, cur, i = [], "", 0
+    while i < len(line):
+        ch = line[i]
+        if ch == "\\" and i + 1 < len(line):
+            cur += line[i + 1]
+            i += 2
+            continue
+        if ch == ":":
+            fields.append(cur)
+            cur = ""
+        else:
+            cur += ch
+        i += 1
+    fields.append(cur)
+    while len(fields) < expected:
+        fields.append("")
+    return fields[:expected]
+
+
+def human_minutes(raw):
+    try:
+        minutes = int(raw)
+    except (TypeError, ValueError):
+        return ""
+    if minutes <= 0:
+        return ""
+    hours, mins = divmod(minutes, 60)
+    return f"{mins}m left" if hours <= 0 else f"{hours}h {mins:02d}m left"
+
+
+# ---------------------------------------------------------------------------
+# data providers
+# ---------------------------------------------------------------------------
+
+
+class Bluetooth:
+    """bluetoothctl wrapper, with tri-state probes and verified actions."""
+
+    @staticmethod
+    def powered():
+        rc, out, _ = run(["bluetoothctl", "show"])
+        if rc != 0:
+            return None
+        match = re.search(r"Powered:\s*(\w+)", out)
+        return match.group(1) == "yes" if match else None
+
+    @staticmethod
+    def set_power(on):
+        return run(["bluetoothctl", "power", "on" if on else "off"])[0] == 0
+
+    @staticmethod
+    def _devices(paired_only):
+        args = ["bluetoothctl", "devices"] + (["Paired"] if paired_only else [])
+        rc, out, _ = run(args)
+        if rc != 0:
+            return None  # couldn't tell
+        found = []
+        for line in out.splitlines():
+            match = re.match(
+                r"^Device\s+((?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})\s*(.*)$", line
+            )
+            if match:
+                found.append((match.group(1), match.group(2).strip() or match.group(1)))
+        return found
+
+    @staticmethod
+    def paired():
+        return Bluetooth._devices(True)
+
+    @staticmethod
+    def known():
+        return Bluetooth._devices(False)
+
+    @staticmethod
+    def info(mac):
+        rc, out, _ = run(["bluetoothctl", "info", mac])
+        if rc == 124:
+            return None
+        if "not available" in out:
+            return {}
+        data = {}
+        for key in ("Connected", "Paired", "Trusted", "Battery Percentage"):
+            match = re.search(rf"{key}:\s*(\S+)", out)
+            if match:
+                data[key] = match.group(1)
+        return data
+
+    @staticmethod
+    def connect(mac):
+        return run(["bluetoothctl", "connect", mac], timeout=22)[0] == 0
+
+    @staticmethod
+    def disconnect(mac):
+        return run(["bluetoothctl", "disconnect", mac])[0] == 0
+
+    @staticmethod
+    def pair(mac, name):
+        if run(["bluetoothctl", "trust", mac])[0] != 0:
+            return False, "Could not trust device"
+        if run(["bluetoothctl", "pair", mac], timeout=22)[0] != 0:
+            return False, "Pairing failed (device may need its agent)"
+        run(["bluetoothctl", "connect", mac], timeout=22)
+        return True, f"Paired {name}"
+
+    @staticmethod
+    def forget(mac):
+        """Disconnect first (bluez refuses RemoveDevice with a live link, and
+        speakers reconnect instantly), then verify the device really left the
+        Paired list before reporting success."""
+        for _ in range(8):
+            if (Bluetooth.info(mac) or {}).get("Connected") != "yes":
+                break
+            run(["bluetoothctl", "disconnect", mac])
+            time.sleep(0.5)
+        detail = ""
+        for _ in range(3):
+            rc, out, _ = run(["bluetoothctl", "remove", mac], timeout=10)
+            detail = "timed out" if rc == 124 else (out.strip().replace("\n", " ") or f"rc={rc}")
+            paired = Bluetooth.paired()
+            if paired is None:
+                time.sleep(1)
+                continue
+            if not any(m.upper() == mac.upper() for m, _ in paired):
+                return True, "Forgot device"
+            run(["bluetoothctl", "disconnect", mac])
+            time.sleep(1)
+        return False, f"Could not forget device ({detail})"
+
+    @staticmethod
+    def scan(seconds=12):
+        run(["bluetoothctl", "pairable", "on"])
+        run(["bluetoothctl", "power", "on"])
+        run(["bluetoothctl", "--timeout", str(seconds), "scan", "on"], timeout=seconds + 4)
+
+
+class Wifi:
+    """nmcli wrapper. Note: nmcli reports wifi connections as
+    '802-11-wireless', never 'wifi' - matching on the wrong string is why
+    saved networks used to look empty."""
+
+    @staticmethod
+    def radio_on():
+        rc, out, _ = run(["nmcli", "radio", "wifi"])
+        return out.strip().lower() == "enabled" if rc == 0 else None
+
+    @staticmethod
+    def set_radio(on):
+        return run(["nmcli", "radio", "wifi", "on" if on else "off"])[0] == 0
+
+    @staticmethod
+    def device():
+        """(name, state, ip4-without-mask) for the first wifi interface."""
+        rc, out, _ = run(["nmcli", "-g", "GENERAL.DEVICE,GENERAL.STATE,IP4.ADDRESS", "dev", "show"])
+        if rc != 0:
+            return None
+        for line in out.splitlines():
+            name, state, addr = nm_fields(line, 3)
+            if not re.match(r"^wl", name):
+                continue
+            return name, state, addr.split("/")[0]
+        return None
+
+    @staticmethod
+    def active_ssid():
+        dev = Wifi.device()
+        if not dev:
+            return None
+        rc, out, _ = run(["nmcli", "-g", "GENERAL.CONNECTION", "dev", "show", dev[0]])
+        return out.strip() or None if rc == 0 else None
+
+    @staticmethod
+    def saved():
+        """Saved wifi profiles -> [(ssid, device-or-empty)]."""
+        rc, out, _ = run(["nmcli", "-t", "-f", "NAME,TYPE,DEVICE", "con", "show"])
+        if rc != 0:
+            return None
+        found = []
+        for line in out.splitlines():
+            name, ctype, device = nm_fields(line, 3)
+            if name and ctype in ("802-11-wireless", "wifi"):
+                found.append((name, device))
+        return found
+
+    @staticmethod
+    def scan_list(rescan=False):
+        args = ["nmcli", "-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "dev", "wifi", "list"]
+        if not rescan:
+            args += ["--rescan", "no"]
+        rc, out, _ = run(args, timeout=25 if rescan else 8)
+        if rc != 0:
+            return None
+        seen, nets = set(), []
+        for line in out.splitlines():
+            inuse, ssid, signal, security = nm_fields(line, 4)
+            ssid = ssid.strip()
+            if not ssid or ssid in seen:
+                continue
+            seen.add(ssid)
+            nets.append(
+                {
+                    "ssid": ssid,
+                    "in_use": inuse.strip() == "*",
+                    "signal": int(signal) if signal.strip().isdigit() else 0,
+                    "security": security.strip(),
+                }
+            )
+        nets.sort(key=lambda n: (not n["in_use"], -n["signal"]))
+        return nets
+
+    @staticmethod
+    def has_profile(ssid):
+        """True if a saved Wi-Fi connection profile already exists for this
+        network. NetworkManager names a profile after the SSID when the network
+        is first joined, so match on NAME (only `con show` exposes that)."""
+        rc, out, _ = run(["nmcli", "-t", "-f", "NAME,TYPE", "con", "show"], timeout=8)
+        if rc != 0:
+            return False
+        for line in out.splitlines():
+            name, ctype = nm_fields(line, 2)
+            if name.strip() == ssid and ctype.strip() in ("802-11-wireless", "wifi"):
+                return True
+        return False
+
+    @staticmethod
+    def connect(ssid, password=None):
+        """-> (ok, message, needs_password)
+
+        A network that has never been joined has no connection profile yet, so
+        `nmcli con up id <ssid>` fails with "unknown connection". Ask
+        NetworkManager to connect to the SSID itself instead: that creates the
+        profile, joins open networks right away, and reports back that a
+        password is required for secured ones.
+        """
+        if password is not None:
+            cmd = ["nmcli", "dev", "wifi", "connect", ssid, "password", password]
+        elif Wifi.has_profile(ssid):
+            cmd = ["nmcli", "con", "up", "id", ssid]
+        else:
+            cmd = ["nmcli", "dev", "wifi", "connect", ssid]
+        rc, out, err = run(cmd, timeout=30)
+        blob = f"{out}\n{err}"
+        if rc != 0 and "unknown connection" in blob.lower():
+            # The profile was gone between the lookup and the call: connect by
+            # network name instead of profile name.
+            rc, out, err = run(["nmcli", "dev", "wifi", "connect", ssid], timeout=30)
+            blob = f"{out}\n{err}"
+        if rc == 0:
+            return True, f"Connected to {ssid}", False
+        low = blob.lower()
+        if (
+            "secrets were required" in low
+            or "passwords or encryption keys are required" in low
+            or "password for" in low
+        ):
+            return False, "", True
+        first = (err or "").strip().splitlines()
+        return False, f"Failed: {first[0] if first else 'unknown error'}", False
+
+    @staticmethod
+    def disconnect():
+        # BUGFIX (KOX): the rice called bare `nmcli con down`, which always
+        # fails with "Error: No connection specified." - the panel's
+        # Disconnect button never worked. Disconnect the Wi-Fi device itself:
+        # scoped to the wifi interface only, so a wired uplink (usb0) can
+        # never be torn down by accident.
+        dev = Wifi.device()
+        if not dev:
+            return False
+        return run(["nmcli", "device", "disconnect", dev[0]])[0] == 0
+
+    @staticmethod
+    def forget(ssid):
+        return run(["nmcli", "con", "delete", "id", ssid], timeout=12)[0] == 0
+
+    @staticmethod
+    def link_details():
+        """Live link facts for the Wi-Fi device -> dict or None.
+
+        dns/con drive the DNS section and the header; `con` is the
+        active profile name ("" when connected to nothing)."""
+        dev = Wifi.device()
+        if not dev:
+            return None
+        name, _state, ip = dev
+        con = Wifi.active_ssid() or ""
+        gw = ""
+        rc, out, _ = run(["ip", "-4", "route", "show", "default", "dev", name], timeout=5)
+        if rc == 0:
+            match = re.search(r"default via (\S+)", out)
+            gw = match.group(1) if match else ""
+        dns = []
+        rc, out, _ = run(["nmcli", "-g", "IP4.DNS", "dev", "show", name], timeout=5)
+        if rc == 0:
+            dns = [
+                t.strip()
+                for t in out.splitlines()
+                if re.match(r"^\d+\.\d+\.\d+\.\d+$", t.strip())
+            ]
+        ignore = False
+        if con:
+            rc, out, _ = run(
+                ["nmcli", "-g", "ipv4.ignore-auto-dns", "con", "show", con], timeout=5
+            )
+            ignore = rc == 0 and out.strip().lower() == "yes"
+        return {"dev": name, "ip": ip, "gw": gw, "dns": dns, "con": con, "ignore": ignore}
+
+    @staticmethod
+    def set_dns(con, ips):
+        """Point the profile at explicit resolvers (ips=[] resets to DHCP).
+        `nmcli device reapply` applies DNS live, without dropping the link."""
+        if not con:
+            return False
+        cmd = ["nmcli", "con", "mod", con, "ipv4.ignore-auto-dns", "no" if not ips else "yes"]
+        cmd += ["ipv4.dns", " ".join(ips)]
+        ok = run(cmd, timeout=10)[0] == 0
+        dev = Wifi.device()
+        if ok and dev:
+            run(["nmcli", "device", "reapply", dev[0]], timeout=15)
+        return ok
+
+
+class Power:
+    @staticmethod
+    def battery():
+        """-> (percent, status, time_remaining_minutes) or None."""
+        try:
+            supplies = sorted(os.listdir("/sys/class/power_supply"))
+        except OSError:
+            return None
+        for base in supplies:
+            if not base.startswith("BAT"):
+                continue
+            path = os.path.join("/sys/class/power_supply", base)
+
+            def read(name, default=""):
+                try:
+                    with open(os.path.join(path, name)) as fh:
+                        return fh.read().strip()
+                except OSError:
+                    return default
+
+            raw = read("capacity", "-1")
+            if not raw.lstrip("-").isdigit() or int(raw) < 0:
+                continue
+            left = read("time_to_empty_now") or read("time_to_full_now")
+            # Clamp: some drivers over-report (this BAT1 reports 101 on AC).
+            return min(int(raw), 100), read("status", "Unknown"), left
+        return None
+
+    @staticmethod
+    def profile():
+        rc, out, _ = run(["powerprofilesctl", "get"])
+        return out.strip() if rc == 0 and out.strip() else None
+
+    @staticmethod
+    def set_profile(name):
+        rc, _, err = run(["powerprofilesctl", "set", name], timeout=10)
+        detail = (err or "").strip().splitlines()
+        return rc == 0, (detail[0] if detail else "")
+
+    @staticmethod
+    def brightness():
+        try:
+            names = sorted(os.listdir("/sys/class/backlight"))
+        except OSError:
+            return None
+        for name in names:
+            try:
+                with open(f"/sys/class/backlight/{name}/brightness") as fh:
+                    current = int(fh.read().strip())
+                with open(f"/sys/class/backlight/{name}/max_brightness") as fh:
+                    maximum = int(fh.read().strip())
+            except (OSError, ValueError):
+                continue
+            if maximum > 0:
+                return max(1, min(100, round(current * 100 / maximum)))
+        return None
+
+    @staticmethod
+    def set_brightness(percent):
+        value = max(1, min(100, int(percent)))
+        return run(["brightnessctl", "set", f"{value}%"], timeout=8)[0] == 0
+
+    @staticmethod
+    def volume():
+        rc, out, _ = run(["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"])
+        if rc != 0:
+            return None
+        match = re.search(r"([\d.]+)", out)
+        if not match:
+            return None
+        return int(round(float(match.group(1)) * 100)), "MUTED" in out.upper()
+
+    @staticmethod
+    def set_volume(percent):
+        value = max(0, min(100, int(percent)))
+        return run(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", f"{value}%"], timeout=8)[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# single instance: same button closes, different button swaps
+# ---------------------------------------------------------------------------
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+class SingleInstance:
+    def __init__(self, mode):
+        self.mode = mode
+        runtime = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+        self.lock_path = os.path.join(runtime, "kox-panel.lock")
+        self.state_path = self.lock_path + ".state"
+        self.handle = None
+
+    def acquire(self):
+        """True -> show the panel. False -> the click closed an open panel."""
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            handle = open(self.lock_path, "a+")
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                pid, mode = self._read_state()
+                if pid and pid_alive(pid):
+                    same = mode == self.mode
+                    self._terminate(pid)
+                    handle.close()
+                    if same:
+                        return False  # same bar button: toggle closed
+                    time.sleep(0.15)
+                    continue
+                handle.close()  # owner vanished: retry
+                time.sleep(0.1)
+                continue
+            handle.seek(0)
+            handle.truncate()
+            handle.write(f"{os.getpid()} {self.mode}\n")
+            handle.flush()
+            self.handle = handle
+            # The pid/mode must ALSO go to their own file: flock tells us that
+            # *someone* holds the lock but not which pid or which panel, and
+            # without this the "click the same button again to close" toggle
+            # can never identify its target.
+            self._write_state()
+            return True
+        return False
+
+    def _read_state(self):
+        try:
+            with open(self.state_path) as fh:
+                pid, mode = fh.read().split()[:2]
+            return int(pid), mode
+        except (OSError, ValueError, IndexError):
+            return 0, ""
+
+    def _write_state(self):
+        with open(self.state_path, "w") as fh:
+            fh.write(f"{os.getpid()} {self.mode}\n")
+
+    @staticmethod
+    def _terminate(pid, grace=1.2):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            return
+        end = time.time() + grace
+        while time.time() < end and pid_alive(pid):
+            time.sleep(0.05)
+        if pid_alive(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+    def release(self):
+        if self.handle:
+            try:
+                fcntl.flock(self.handle, fcntl.LOCK_UN)
+                self.handle.close()
+            except OSError:
+                pass
+            self.handle = None
+
+
+# ---------------------------------------------------------------------------
+# styling
+# ---------------------------------------------------------------------------
+
+DEFAULT_CSS = """
+/* KOX panel theme - Android-style quick settings: opaque charcoal surface,
+   monospace type, outlined controls, letter-spaced uppercase section titles.
+   RULE: backgrounds are ALWAYS dark/neutral, never tinted by any theme; the
+   theme accent colour applies to TEXT ONLY (%%ACCENT%%, resolved at load
+   time from ~/.config/waybar/theme-accent.css, else the KOX pink). */
+window.kox-panel { background: transparent; }
+
+.panel {
+  background: rgba(25, 27, 32, 0.97);
+  border: 1px solid rgba(56, 61, 69, 0.85);
+  border-radius: 12px;
+  padding: 12px 16px 10px 16px;
+  color: #e6e7e9;
+  font-family: "JetBrainsMono Nerd Font", monospace;
+  font-size: 11px;
+}
+
+/* header: big glyph, name, letter-spaced status, QR + switch on the right */
+.hdr { padding: 0 0 10px 0; }
+.hdr-icon { font-size: 21px; color: #e6e7e9; }
+.hdr-title { font-size: 14px; font-weight: bold; color: #e6e7e9; }
+.hdr-sub { font-size: 9px; color: #8f959e; letter-spacing: 2.5px; padding-top: 3px; }
+
+/* outlined square icon button (header QR control) */
+button.sq {
+  background: transparent;
+  border: 1px solid #383d45;
+  border-radius: 9px;
+  padding: 5px 7px;
+  color: #e6e7e9;
+  font-size: 14px;
+}
+button.sq:hover { background: #262a31; }
+button.sq:active { background: #2f343c; }
+
+/* Android switch: dark trough with a white knob; on = white trough */
+switch {
+  min-width: 42px;
+  min-height: 22px;
+  background-image: none;
+  background-color: #2a2e36;
+  border: 1px solid #383d45;
+  border-radius: 11px;
+}
+switch:checked {
+  background-image: none;
+  background-color: #e6e7e9;
+  border-color: #e6e7e9;
+}
+switch slider {
+  min-width: 18px;
+  min-height: 18px;
+  margin: 1px;
+  border-radius: 9px;
+  background-image: none;
+  background-color: #e6e7e9;
+}
+switch:checked slider {
+  background-image: none;
+  background-color: #191b20;
+}
+
+/* hairline divider between sections */
+separator {
+  min-height: 1px;
+  background-color: #262a31;
+  padding: 0;
+}
+
+/* section titles: uppercase + letter-spaced, dim */
+.section {
+  font-size: 9px;
+  color: #8f959e;
+  letter-spacing: 2.5px;
+  padding: 0 1px 8px 1px;
+}
+
+/* list rows. The listbox's GTK3 node name differs between builds (list /
+   listbox), so both element names plus the .list class are forced
+   transparent: Adwaita light paints `list` white, which used to bleed
+   through as a white splatter behind near-white row text. Every row state
+   is then forced dark - no theme and no state may paint a bright
+   background; states only move the TEXT to the accent colour (driven from
+   code via the .lit class, since GTK3 CSS descendant selectors are
+   unreliable). */
+list, listbox, .list {
+  background: transparent;
+  background-image: none;
+}
+row {
+  background: transparent;
+  background-image: none;
+  border-radius: 8px;
+  padding: 6px 8px;
+  margin: 0;
+}
+row:hover, row.activatable:hover,
+row:active, row.activatable:active,
+row:focus, row.activatable:focus,
+row:selected, row.activatable:selected,
+row.row-sel, row.row-sel:hover, row.row-sel:selected, row.row-sel:focus {
+  background: #22252b;
+  background-image: none;
+}
+
+.row-icon { font-size: 13px; color: #8f959e; }
+.row-name { font-size: 12px; color: #e6e7e9; }
+.row-name.lit { color: %%ACCENT%%; }
+.row-sub { font-size: 10px; color: #8f959e; }
+.row-trail { font-size: 12px; color: #8f959e; }
+.dim { color: #8f959e; }
+.accent { color: %%ACCENT%%; }
+.hint { font-size: 10px; color: #8f959e; padding: 5px 2px; }
+
+/* quiet icon buttons (row actions, footer) */
+button.flat {
+  background: transparent;
+  border: none;
+  color: #8f959e;
+  padding: 2px 4px;
+  border-radius: 7px;
+  font-size: 12px;
+}
+button.flat:hover { background: #2f343c; color: #e6e7e9; }
+button.flat.danger:hover { background: rgba(255, 107, 107, 0.14); color: #ff6b6b; }
+
+/* outlined pills: DNS provider, Run, form buttons. Side padding is tiny on
+   purpose: four labelled pills must share one 318px row without clipping. */
+button.pill {
+  background: transparent;
+  border: 1px solid #383d45;
+  border-radius: 8px;
+  padding: 7px 4px;
+  color: #e6e7e9;
+  font-size: 10px;
+}
+button.pill:hover { background: #22252b; }
+button.pill:active { background: #2f343c; }
+button.pill.active { background: #2f343c; border-color: #4a5058; }
+
+/* sliders */
+scale { min-height: 20px; }
+scale trough {
+  min-height: 5px;
+  background: #2a2e36;
+  border-radius: 3px;
+}
+scale highlight { background: #e6e7e9; border-radius: 3px; }
+scale slider {
+  min-width: 14px;
+  min-height: 14px;
+  border-radius: 7px;
+  background: #e6e7e9;
+  margin: -5px;
+}
+
+/* entries (password, custom DNS) */
+entry {
+  background: #22252b;
+  border: 1px solid #383d45;
+  border-radius: 8px;
+  color: #e6e7e9;
+  padding: 6px 9px;
+  font-size: 11px;
+}
+entry:focus { border-color: #565c66; }
+
+/* QR code card shown inside the panel (classic white card so any camera
+   scanner can read it) */
+.qr-card {
+  background: #f8f8f2;
+  border-radius: 8px;
+  padding: 8px;
+}
+
+/* Tall lists are capped in a GtkScrolledWindow (see _list). The viewport and
+   the scroll frame must be transparent too, or Adwaita light paints them
+   white behind the rows again - the same bleed-through the listbox fix
+   handles. No overshoot/undershoot gradients either. */
+scrolledwindow, viewport {
+  background: transparent;
+  background-image: none;
+}
+scrolledwindow undershoot, scrolledwindow overshoot { background-image: none; }
+"""
+
+
+_CSS_PROVIDER_PRIORITY = Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION - 1
+_CSS_PROVIDERS = []
+
+
+def theme_accent():
+    """The active theme's accent colour, read from the waybar theme-accent.css
+    that the theme switcher rewrites on theme changes. KOX policy: the theme
+    accent may colour TEXT only - backgrounds always stay dark - so only the
+    text rules of the built-in CSS consume it (%%ACCENT%% placeholder). No
+    file or no definition -> the KOX pink."""
+    try:
+        with open(os.path.expanduser("~/.config/waybar/theme-accent.css")) as fh:
+            match = re.search(r"@define-color\s+accent\s+([^;]+);", fh.read())
+        if match:
+            return match.group(1).strip()
+    except OSError:
+        pass
+    return None
+
+
+def load_css():
+    accent = theme_accent() or ACCENT
+    css = DEFAULT_CSS.replace("%%ACCENT%%", accent)
+    try:
+        with open(os.path.expanduser("~/.config/kox-panel/style.css")) as fh:
+            css = css + "\n" + fh.read()
+        # cachy-ui-scale generates this after style.css, so the type scale
+        # always wins without duplicating the panel's geometry rules.
+        try:
+            with open(os.path.expanduser("~/.config/kox-panel/scale.css")) as fh:
+                css = css + "\n" + fh.read()
+        except OSError:
+            pass
+    except OSError:
+        pass
+    provider = Gtk.CssProvider()
+    try:
+        provider.load_from_data(css.encode())
+    except GLib.Error as exc:
+        sys.stderr.write(f"kox-panel: custom CSS rejected ({exc}); using built-in theme\n")
+        provider.load_from_data(DEFAULT_CSS.replace("%%ACCENT%%", ACCENT).encode())
+    # Install a fresh provider; a newer provider outranks the previous one.
+    # Keep the Python reference alive for the life of the daemon.
+    global _CSS_PROVIDER_PRIORITY, _CSS_PROVIDERS
+    _CSS_PROVIDER_PRIORITY += 1
+    _CSS_PROVIDERS.append(provider)
+    Gtk.StyleContext.add_provider_for_screen(
+        Gdk.Screen.get_default(), provider, _CSS_PROVIDER_PRIORITY
+    )
+
+
+def _reload_css():
+    # SIGHUP path for cachy-ui-scale: rebuild the CSS provider so the warm
+    # daemon and its panels survive a scale change. Return True to keep the
+    # GLib signal source installed for subsequent scale changes.
+    try:
+        load_css()
+    except Exception as exc:
+        sys.stderr.write(f"kox-panel: CSS reload failed ({exc})\n")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# small widget helpers
+# ---------------------------------------------------------------------------
+
+
+def label(text, css_class=None, xalign=0.0, ellipsize=False):
+    lbl = Gtk.Label()
+    lbl.set_text(text)
+    lbl.set_xalign(xalign)
+    if css_class:
+        lbl.get_style_context().add_class(css_class)
+    if ellipsize:
+        lbl.set_ellipsize(Pango.EllipsizeMode.END)
+    return lbl
+
+
+def spacer():
+    return Gtk.Box()
+
+
+# ---------------------------------------------------------------------------
+# panel
+# ---------------------------------------------------------------------------
+
+
+class Panel(Gtk.Window):
+    def __init__(self, mode, instance=None, warm=False):
+        # warm=True builds the widget tree but never maps the window and never
+        # starts the refresh timer: the daemon creates all three panels once at
+        # session start and maps one on demand. See Daemon below.
+        super().__init__(title=APP)
+        self.mode = mode
+        self.instance = instance
+        self.regions = {}  # key -> [title_label|None, container, signature]
+        self.syncing = False  # guards switch/slider feedback loops
+        self.scanning = False
+        self.password_for = None
+        self.password_entry = None
+        self.wifi_busy = False
+        self.qr_mode = False
+        # Global x the panel was last pinned at (a click or the bar-centre
+        # fallback), else None. screen_rect() must reproduce the
+        # compositor's placement for screenshots/debug, and only this
+        # remembers a pinned x.
+        self._placed_x = None
+
+        self.set_decorated(False)
+        self.set_resizable(False)
+        self.set_app_paintable(True)
+        screen = self.get_screen()
+        visual = screen.get_rgba_visual()
+        if visual:
+            self.set_visual(visual)
+        self.get_style_context().add_class(APP)
+
+        GtkLayerShell.init_for_window(self)
+        GtkLayerShell.set_layer(self, GtkLayerShell.Layer.TOP)
+        GtkLayerShell.set_namespace(self, APP)
+        self.place()
+        GtkLayerShell.set_exclusive_zone(self, -1)  # never move the bar
+        # KeyboardMode.NONE, and this is load-bearing. Measured on this box with
+        # a minimal layer surface, asking whether another window can take focus
+        # while the panel is mapped:
+        #     NONE        -> focus moves  (click-away works)
+        #     ON_DEMAND   -> focus does NOT move
+        #     EXCLUSIVE   -> focus does NOT move
+        # Any keyboard interactivity at all makes Hyprland keep the panel's
+        # surface focused, so the window you clicked never gets focus, no
+        # activewindow event is emitted, and click-away is impossible. That was
+        # the real reason the panel could only be dismissed with Escape.
+        # The Wi-Fi password prompt is the one exception: it temporarily uses
+        # ON_DEMAND and pauses the focus/cursor watchers while it is open.
+        GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.NONE)
+        self._pin_monitor()
+
+        self.connect("destroy", self._on_destroy)
+        self.connect("key-press-event", self._on_key)
+        self.connect("focus-out-event", self._on_focus_out)
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        outer.get_style_context().add_class("panel")
+        outer.set_size_request(PANEL_WIDTH, -1)
+        self.add(outer)
+        # Kept for the QR swap view, which lives outside the region body.
+        self.outer = outer
+
+        # header: icon | title+subtitle | trailing widgets
+        self.hdr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+        self.hdr.get_style_context().add_class("hdr")
+        outer.pack_start(self.hdr, False, False, 0)
+        self.hdr_icon = label("", "hdr-icon")
+        # Align the icon with the title line (not the vertical middle of the
+        # two-line text block) so the network name sits level with it.
+        self.hdr_icon.set_valign(Gtk.Align.START)
+        self.hdr_title = label("", "hdr-title")
+        self.hdr_sub = label("", "hdr-sub")
+        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        text_box.pack_start(self.hdr_title, False, False, 0)
+        text_box.pack_start(self.hdr_sub, False, False, 0)
+        self.hdr_end = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        # Keep the trailing controls (switch / battery %) on the title line too,
+        # instead of centred between the two text lines.
+        self.hdr_end.set_valign(Gtk.Align.START)
+        self.hdr.pack_start(self.hdr_icon, False, False, 0)
+        self.hdr.pack_start(text_box, True, True, 0)
+        self.hdr.pack_end(self.hdr_end, False, False, 0)
+
+        self.body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        outer.pack_start(self.body, True, True, 0)
+
+        # Wi-Fi password prompt. no_show_all keeps the initial show_all() from
+        # revealing it; it is shown explicitly when a secured network is picked.
+        self.form = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.form.set_no_show_all(True)
+        self.body.pack_start(self.form, False, False, 0)
+
+        footer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        footer.set_margin_top(6)
+        outer.pack_end(footer, False, False, 0)
+        self.footer = footer
+
+        {"bluetooth": self._init_bluetooth, "wifi": self._init_wifi, "battery": self._init_battery}[
+            mode
+        ](footer)
+
+        self._tick_source = 0
+        self._cursor_watch_id = 0
+        self._cursor_was_inside = False
+        self.warm = warm
+        # Explicit open flag. Gtk.Widget.get_mapped() is NOT reliable for these
+        # layer-shell windows: a panel can be plainly visible on screen while
+        # get_mapped() still reports False, so the daemon's focus watcher saw
+        # mapped=[False, False, False] with a panel actually showing and bailed
+        # out before ever comparing focus. Track intent instead.
+        self.is_open = False
+        if warm:
+            return  # unmapped and unpolluted until the daemon is asked for it
+        self.refresh(force=True)
+        # This standalone open is also a bar click: re-pin below the icon
+        # instead of the boot-race right-edge anchor from __init__. The
+        # position comes from the same click snapshot the daemon path uses.
+        self.place(bar_anchor(_click_pos))
+        self.show_all()
+        self.form.hide()
+        self._start_tick()
+        # The standalone fallback panel is genuinely on screen: mirror the
+        # open state show_panel() establishes in daemon mode. is_open gates
+        # the 2s data tick, the focus-out poll and the cursor watch — without
+        # it a daemon-less click produced a panel that never refreshed and
+        # never dismissed itself at all.
+        self.is_open = True
+        self._start_cursor_watch()
+
+    # -- daemon lifecycle ---------------------------------------------------
+
+    def _start_tick(self):
+        self._stop_tick()
+        self._tick_source = GLib.timeout_add_seconds(2, self._tick)
+
+    def _stop_tick(self):
+        if self._tick_source:
+            GLib.source_remove(self._tick_source)
+            self._tick_source = 0
+
+    def place(self, cursor_x=None):
+        """Pin the panel under the bar. Called at build AND on every open:
+        at session start the daemon can win the race with Waybar (no layer
+        surface yet -> fallback stuck for the whole session), so placement
+        is re-asserted when the user actually clicks, when Waybar is up.
+
+        With cursor_x (a click on a bar widget) the panel is centred under
+        the pointer, so it opens right below the icon no matter where the
+        icon sits on the bar - island layouts move the widgets around, the
+        anchor must follow the click instead of the bar's right edge.
+        Anchors are set explicitly both ways: layer-shell anchors are
+        sticky, and LEFT+RIGHT together would stretch the panel full width.
+        """
+        self._placed_x = None
+        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.TOP, True)
+        if cursor_x is not None:
+            self._place_cursor(cursor_x)
+        else:
+            wb = waybar_rect()
+            if wb is not None:
+                # No click snapshot (a keybind, or the pointer had already
+                # left the icon when the snapshot landed): anchor to the
+                # bar's centre. On an island layout the widgets live there,
+                # so the panel still opens below them instead of flying to
+                # the screen's right edge.
+                left = max(2, wb[0] + (wb[1] - PANEL_WIDTH) // 2)
+                GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.LEFT, True)
+                GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.RIGHT, False)
+                GtkLayerShell.set_margin(self, GtkLayerShell.Edge.LEFT, left)
+                GtkLayerShell.set_margin(self, GtkLayerShell.Edge.RIGHT, 0)
+                self._placed_x = self._monitor_geo()[0] + left
+            else:
+                GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.RIGHT, True)
+                GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.LEFT, False)
+                GtkLayerShell.set_margin(self, GtkLayerShell.Edge.RIGHT, GAP)
+                GtkLayerShell.set_margin(self, GtkLayerShell.Edge.LEFT, 0)
+        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.TOP, bar_height() + GAP)
+
+    def _monitor_geo(self):
+        """(x, width) of the primary monitor, (0, 0) when unknown."""
+        try:
+            display = Gdk.Display.get_default()
+            mon = display.get_primary_monitor() or display.get_monitor(0)
+            geo = mon.get_geometry()
+            return geo.x, geo.width
+        except Exception:
+            return 0, 0
+
+    def _place_cursor(self, cursor_x):
+        """Anchor the panel centred under a bar click (see place()). The
+        margin is output-relative but cursorpos is global, so subtract the
+        monitor offset; screen_rect() then needs the global x back."""
+        geo_x, screen_w = self._monitor_geo()
+        local = cursor_x - geo_x - PANEL_WIDTH // 2
+        if screen_w:
+            local = min(local, screen_w - PANEL_WIDTH - 2)
+        local = max(2, local)
+        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.LEFT, True)
+        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.RIGHT, False)
+        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.LEFT, local)
+        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.RIGHT, 0)
+        self._placed_x = geo_x + local
+
+    def show_panel(self, click=None):
+        """Map an already-built panel, then re-read its data a beat later."""
+        # Re-assert placement on every open: the anchors fixed at daemon
+        # start may be the boot-race fallback (see place()), and a click on
+        # a bar widget opens centred below the icon. The click position was
+        # captured in the helper process the instant the icon was pressed
+        # (read_cursorpos) and rode here through the socket, so no cursor
+        # or layer query happens on this (open-latency-critical) path.
+        self.place(bar_anchor(click))
+        # The window was built (and its output pinned) at daemon start. That is
+        # exact on this single-monitor machine; a second output would need the
+        # panel rebuilt when the pointer crosses to it, since gtk-layer-shell
+        # only accepts set_monitor before the surface is realised.
+        # Re-assert NONE on every open: prewarm() toggles interactivity so a stray
+        # frame at login cannot steal input, and the mode is set again once the
+        # panel is really being shown. See the long note in __init__ for why
+        # NONE (and not EXCLUSIVE/ON_DEMAND) is what allows click-away.
+        GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.NONE)
+        self.show_all()
+        self.form.hide()
+        # Deliberately NOT present(): with focus_follows_mouse enabled, asking
+        # GTK to raise/activate the window made Hyprland report a different
+        # active window the moment the panel appeared, which the daemon then
+        # read as "the user clicked away" and which the user perceived as the
+        # panel stealing the active window. A layer-shell surface is already on
+        # top once mapped, so there is nothing to raise.
+        self.is_open = True
+        self._start_tick()
+        # Labels already hold the snapshot taken when the daemon started, so
+        # the first frame is complete and lands immediately. The re-read
+        # happens after the paint so nmcli/bluetoothctl/upower latency is
+        # never between the click and the window.
+        GLib.timeout_add(40, self._refresh_once)
+        self._start_cursor_watch()
+
+    def _refresh_once(self):
+        self._tick()
+        return False
+
+    # -- click-away via cursor position ------------------------------------
+    #
+    # The daemon's focus watcher catches clicks on other windows, but it cannot
+    # see the cursor at all: Hyprland's socket2 emits no pointer/cursor event, so
+    # sliding the pointer onto empty desktop or the wallpaper changes no window
+    # focus and fires nothing. That is precisely the "move the cursor away and
+    # expect it to close" case, and focus tracking is blind to it.
+    #
+    # Hyprland does answer `hyprctl cursorpos` on demand, so poll it while this
+    # panel is open and close once the pointer has left both the panel and the
+    # bar. Polling runs only while a panel is actually showing, so it costs
+    # nothing at idle, and it lives on Panel (not the Daemon) so the standalone
+    # fallback path behaves identically.
+    CURSOR_POLL_MS = 90
+
+    def _start_cursor_watch(self):
+        if self._cursor_watch_id:
+            return
+        self._cursor_was_inside = False
+        self._cursor_watch_id = GLib.timeout_add(self.CURSOR_POLL_MS,
+                                                 self._cursor_tick)
+
+    def _stop_cursor_watch(self):
+        if self._cursor_watch_id:
+            GLib.source_remove(self._cursor_watch_id)
+            self._cursor_watch_id = 0
+
+    def _cursor_tick(self):
+        if not self.is_open:
+            self._stop_cursor_watch()
+            return False
+        if self.password_for or self.wifi_busy:
+            return True  # do not dismiss a prompt or an in-flight connection
+        rect = self.screen_rect()
+        if rect is None:
+            return True  # not realisable yet; try again on the next tick
+        x, y, width, height = rect
+        rc, out, _err = run(["hyprctl", "cursorpos"], timeout=2)
+        if rc != 0 or "," not in out:
+            return True
+        try:
+            cx, cy = (int(v) for v in out.strip().split(",")[:2])
+        except ValueError:
+            return True
+        on_panel = x <= cx <= x + width and y <= cy <= y + height
+        # The bar counts as "inside": the user has just clicked a widget there,
+        # and a cursor still resting on the bar must not dismiss the panel.
+        on_bar = cy <= bar_height()
+        if on_panel or on_bar:
+            self._cursor_was_inside = True
+            return True
+        # Only dismiss once the cursor has actually been inside and then left.
+        # Without this, a panel opened from anywhere other than the bar (a
+        # keybind, or a cursor that happened to sit on the desktop) would be
+        # dismissed immediately, every time.
+        if self._cursor_was_inside:
+            self.close()
+            return False
+        return True
+
+    def screen_rect(self):
+        """The panel's on-screen rectangle.
+
+        GTK on Wayland cannot tell a client where the compositor placed it
+        (get_position() is unreliable), so the rectangle is computed from the
+        same anchors gtk-layer-shell was given, using the real allocated height.
+        """
+        try:
+            bar = bar_height()
+            display = Gdk.Display.get_default()
+            mon = display.get_primary_monitor() or display.get_monitor(0)
+            geo = mon.get_geometry()
+            width = PANEL_WIDTH
+            height = self.get_allocated_height()
+            if not height or height <= 1:
+                height = 400
+            wb = waybar_rect()
+            if self._placed_x is not None:
+                # Pinned by place() (a click or the bar-centre fallback);
+                # _placed_x is already in global compositor coordinates.
+                x = self._placed_x
+            elif wb is not None:
+                x = geo.x + wb[0] + (wb[1] - width) // 2
+            else:
+                x = geo.x + geo.width - GAP - width
+            y = geo.y + bar + GAP
+            return (x, y, width, height)
+        except Exception:
+            return None
+
+    def close(self):
+        """Hide in daemon mode (keep the tree for the next click), else destroy."""
+        self._stop_tick()
+        self._stop_cursor_watch()
+        self.is_open = False
+        if self.warm:
+            self.hide()
+            # Drop any half-typed Wi-Fi password so the next open is clean.
+            # Only the Wi-Fi panel has a password form; the other two keep
+            # password_entry as None.
+            self.password_for = None
+            if self.password_entry is not None:
+                self.password_entry.set_text("")
+            self.form.hide()
+            self.form.set_no_show_all(True)
+            # Leave the QR swap view, if it was open.
+            if self.qr_mode and getattr(self, "qr_view", None) is not None:
+                self._hide_qr()
+            GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.NONE)
+        else:
+            self.destroy()
+
+    # -- infrastructure ---------------------------------------------------
+
+    def _pin_monitor(self):
+        try:
+            display = Gdk.Display.get_default()
+            pointer = display.get_default_seat().get_pointer()
+            _, x, y = pointer.get_position()
+            monitor = display.get_monitor_at_point(x, y)
+            if monitor is not None:
+                GtkLayerShell.set_monitor(self, monitor)
+        except Exception:
+            pass
+
+    def _on_destroy(self, *_):
+        if self.instance is not None:
+            self.instance.release()
+
+    def _on_key(self, _widget, event):
+        if event.keyval == Gdk.KEY_Escape:
+            if self.qr_mode:
+                self._hide_qr()
+            elif self.password_for:
+                self._close_password()
+            else:
+                self.close()
+            return True
+        return False
+
+    def _on_focus_out(self, *_):
+        # Poll rather than close on the first signal: focus-out can arrive
+        # before the compositor has actually handed the keyboard over, and a
+        # single check would either close nothing or close too eagerly.
+        if self.password_for or self.wifi_busy:
+            return False
+        self._focus_out_tries = 0
+        GLib.timeout_add(150, self._close_if_unfocused)
+        return False
+
+    def _has_focus(self):
+        """GTK3 spells this has_toplevel_focus(); there is no
+        get_toplevel_focus(). The old name raised AttributeError inside the
+        focus-out poll below, which killed the poll and left the panel stuck
+        open instead of closing when you clicked away."""
+        checker = getattr(self, "has_toplevel_focus", None)
+        if checker is not None:
+            return checker()
+        return False
+
+    def _close_if_unfocused(self):
+        if not self.is_open:
+            return False
+        if self.password_for or self.wifi_busy:
+            # ON_DEMAND keyboard interactivity makes focus churn while the
+            # password entry is open, and a connection attempt may raise an
+            # authentication dialog; neither may dismiss the panel.
+            return False
+        if not self._has_focus():
+            self.close()
+            return False
+        self._focus_out_tries += 1
+        if self._focus_out_tries >= 12:  # ~1.8s and focus never left
+            return False
+        return True
+
+    def _tick(self):
+        # A hidden panel stops polling instead of idling: with three panels
+        # warm, an unconditional 2s timer would spawn nmcli/bluetoothctl/upower
+        # every tick for panels nobody is looking at.
+        if not self.is_open:
+            return False
+        try:
+            self.refresh()
+        except Exception as exc:  # a refresh bug must never kill the panel
+            sys.stderr.write(f"kox-panel: refresh error: {exc}\n")
+        return True
+
+    def _set(self, lbl, text):
+        if lbl.get_text() != text:
+            lbl.set_text(text)
+
+    def _set_safe(self, lbl, on):
+        """Set a switch without re-entering its handler."""
+        self.syncing = True
+        try:
+            lbl.set_active(bool(on))
+        finally:
+            self.syncing = False
+
+    # regions -------------------------------------------------------------
+
+    # Sections that get a hairline divider above them (Android-panel look).
+    RULE_KEYS = {
+        "dns", "known", "paired", "others", "brightness", "volume", "profiles",
+    }
+
+    def _region(self, key, title=None):
+        """Create a region once, in display order; returns its container."""
+        if key in self.regions:
+            return self.regions[key][1]
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        if key in self.RULE_KEYS:
+            sep = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+            sep.set_margin_bottom(10)
+            box.pack_start(sep, False, False, 0)
+        title_lbl = None
+        if title:
+            title_lbl = label(title.upper(), "section")
+            title_lbl.set_no_show_all(True)
+            box.pack_start(title_lbl, False, False, 0)
+        self.body.pack_start(box, False, False, 0)
+        self.regions[key] = [title_lbl, box, None]
+        return box
+
+    def _fill(self, key, title, signature, rows_fn):
+        """Refill a region only when its signature changed: no duplicate
+        sections, no flicker, no rebuilding under the pointer."""
+        box = self._region(key, title)
+        entry = self.regions[key]
+        if entry[2] == signature:
+            return
+        entry[2] = signature
+        for child in list(box.get_children()):
+            if child is not entry[0]:
+                box.remove(child)
+        content = rows_fn()
+        for widget in content:
+            widget.show_all()
+            box.pack_start(widget, False, False, 0)
+        # A region with nothing in it takes no vertical space, and its title
+        # (if any) hides with it. The container itself hides too, so a
+        # section divider never lingers over an empty section.
+        if entry[0] is not None:
+            entry[0].set_visible(bool(content))
+        box.set_visible(bool(content))
+
+    ROW_DARK = (0x22 / 255, 0x25 / 255, 0x2B / 255, 1.0)
+
+    def _row(self, icon, name, sub, active=False, on_activate=None, trailing=None):
+        row = Gtk.ListBoxRow()
+        # Theme-proofing, second belt: Adwaita light carries higher-specificity
+        # rules for row.activatable:hover/:selected/:active than CSS can beat
+        # on every theme, so the dark row states are ALSO forced here as
+        # deprecated-but-unbeatable inline overrides. They render through the
+        # same style context, so the CSS border-radius still rounds them.
+        for flag, rgba in (
+            (Gtk.StateFlags.NORMAL, Gdk.RGBA(0, 0, 0, 0)),
+            (Gtk.StateFlags.PRELIGHT, Gdk.RGBA(*self.ROW_DARK)),
+            (Gtk.StateFlags.SELECTED, Gdk.RGBA(*self.ROW_DARK)),
+            (Gtk.StateFlags.ACTIVE, Gdk.RGBA(*self.ROW_DARK)),
+            (Gtk.StateFlags.FOCUSED, Gdk.RGBA(*self.ROW_DARK)),
+        ):
+            row.override_background_color(flag, rgba)
+        if active:
+            row.get_style_context().add_class("row-sel")
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        row.add(box)
+        if icon:
+            icon_lbl = label(icon, "row-icon")
+            # Level the row icon with the network name (first text line).
+            icon_lbl.set_valign(Gtk.Align.START)
+            box.pack_start(icon_lbl, False, False, 0)
+        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        name_lbl = label(name, "row-name", ellipsize=True)
+        name_lbl.set_max_width_chars(24)
+        text_box.pack_start(name_lbl, False, False, 0)
+        if sub:
+            text_box.pack_start(label(sub, "row-sub", ellipsize=True), False, False, 0)
+        box.pack_start(text_box, True, True, 0)
+        if trailing:
+            box.pack_end(trailing, False, False, 0)
+        # States only ever move the TEXT to the accent (backgrounds stay
+        # dark). CSS :state descendant selectors are unreliable in GTK3, so
+        # the .lit class is driven from the row's state signal instead.
+        row.connect("state-flags-changed", self._row_state, name_lbl)
+        if active:
+            name_lbl.get_style_context().add_class("lit")
+        if on_activate:
+            # row-activated is a ListBox signal, so the action rides along on
+            # the row and the list dispatches it (see _list).
+            row.panel_action = on_activate
+        return row
+
+    def _row_state(self, row, _prev_state, name_lbl):
+        lit = bool(
+            row.get_state_flags()
+            & (Gtk.StateFlags.PRELIGHT | Gtk.StateFlags.SELECTED | Gtk.StateFlags.ACTIVE)
+        )
+        ctx = name_lbl.get_style_context()
+        if lit:
+            ctx.add_class("lit")
+        else:
+            ctx.remove_class("lit")
+
+    # Cap for tall lists: beyond ~4 rows a list scrolls instead of pushing
+    # the panel past the screen edge.
+    LIST_MAX_HEIGHT = 170
+
+    def _list(self, rows):
+        box = Gtk.ListBox()
+        box.get_style_context().add_class("list")
+        # First belt against Adwaita light's white `list` background bleeding
+        # through under transparent rows (the "white splatter").
+        box.override_background_color(Gtk.StateFlags.NORMAL, Gdk.RGBA(0, 0, 0, 0))
+        box.set_selection_mode(Gtk.SelectionMode.NONE)
+        box.connect("row-activated", self._activate_row)
+        for row in rows:
+            box.add(row)
+        # Shrink to fit the content, but never past LIST_MAX_HEIGHT: with
+        # propagate-natural-height the window takes the rows' height until
+        # the cap, then scrolls instead of growing the panel off-screen.
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_max_content_height(self.LIST_MAX_HEIGHT)
+        scroll.set_propagate_natural_height(True)
+        scroll.add(box)
+        return scroll
+
+    @staticmethod
+    def _activate_row(_box, row):
+        action = getattr(row, "panel_action", None)
+        if action:
+            action()
+
+    def _flat_button(self, glyph, tooltip, callback, danger=False):
+        btn = Gtk.Button()
+        btn.set_relief(Gtk.ReliefStyle.NONE)
+        btn.add(label(glyph))
+        ctx = btn.get_style_context()
+        ctx.add_class("flat")
+        if danger:
+            ctx.add_class("danger")
+        btn.set_tooltip_text(tooltip)
+        btn.connect("clicked", lambda *_a: callback())
+        return btn
+
+    def _sq_button(self, glyph, tooltip, callback):
+        """Outlined square icon button for the header (the QR control)."""
+        btn = Gtk.Button()
+        btn.set_relief(Gtk.ReliefStyle.NONE)
+        btn.add(label(glyph))
+        btn.get_style_context().add_class("sq")
+        btn.set_tooltip_text(tooltip)
+        btn.connect("clicked", lambda *_a: callback())
+        return btn
+
+    def _pill_button(self, text, callback):
+        btn = Gtk.Button()
+        btn.set_label(text)
+        btn.get_style_context().add_class("pill")
+        btn.connect("clicked", lambda *_a: callback())
+        return btn
+
+    def _switch(self, callback):
+        sw = Gtk.Switch()
+        sw.set_valign(Gtk.Align.CENTER)
+        sw.connect("notify::active", lambda s, _p: self._on_switch(s, callback))
+        return sw
+
+    def _on_switch(self, sw, callback):
+        if not self.syncing:
+            callback(sw.get_active())
+        self.refresh(force=True)
+
+    def _footer_button(self, glyph, text, callback):
+        btn = Gtk.Button()
+        btn.set_relief(Gtk.ReliefStyle.NONE)
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=7)
+        self.footer_glyph = label(glyph, "dim")
+        self.footer_text = label(text, "row-sub")
+        box.pack_start(self.footer_glyph, False, False, 0)
+        box.pack_start(self.footer_text, False, False, 0)
+        btn.add(box)
+        btn.get_style_context().add_class("flat")
+        btn.connect("clicked", lambda *_a: callback())
+        self.footer.pack_start(btn, False, False, 0)
+        return btn
+
+    def _scanning(self, on, idle_text="Scanning…"):
+        self.scanning = on
+        if not hasattr(self, "footer_text"):
+            return
+        if on:
+            self.footer_text.set_text(idle_text)
+            self.footer_glyph.get_style_context().add_class("accent")
+        else:
+            self.footer_text.set_text(self.footer_idle_text)
+            self.footer_glyph.get_style_context().remove_class("accent")
+
+    def _background(self, work, done):
+        """Run a slow shell-out off the GTK thread, then refresh via idle."""
+        def runner():
+            work()
+            GLib.idle_add(done)
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    # -- bluetooth --------------------------------------------------------
+
+    def _init_bluetooth(self, _footer):
+        self.power_switch = self._switch(self._bt_power)
+        self.hdr_end.pack_end(self.power_switch, False, False, 0)
+        self.footer_idle_text = "Scan for devices"
+        self._footer_button(ICONS["refresh"], self.footer_idle_text, self._bt_scan)
+
+    def _bt_power(self, want):
+        if Bluetooth.set_power(want):
+            notify("Bluetooth", "Bluetooth on" if want else "Bluetooth off")
+        else:
+            notify("Bluetooth", "Could not turn Bluetooth " + ("on" if want else "off"))
+
+    def _bt_scan(self):
+        if self.scanning:
+            return
+        self._scanning(True)
+        self._background(Bluetooth.scan, self._scan_finished)
+
+    def _scan_finished(self):
+        self._scanning(False)
+        self.refresh(force=True)
+        return False
+
+    def _bt_toggle(self, mac, name, connected):
+        def action():
+            if connected:
+                for _ in range(3):
+                    Bluetooth.disconnect(mac)
+                    if (Bluetooth.info(mac) or {}).get("Connected") != "yes":
+                        break
+                    time.sleep(0.8)
+                state = (Bluetooth.info(mac) or {}).get("Connected")
+                if state == "no":
+                    notify("Bluetooth", f"Disconnected {name}")
+                elif state is None:
+                    notify("Bluetooth", f"Disconnect sent to {name} - couldn't confirm")
+                else:
+                    notify("Bluetooth", f"Could not disconnect {name}")
+            else:
+                Bluetooth.connect(mac)
+                state = (Bluetooth.info(mac) or {}).get("Connected")
+                if state == "yes":
+                    notify("Bluetooth", f"Connected {name}")
+                elif state is None:
+                    notify("Bluetooth", f"Connect sent to {name} - couldn't confirm")
+                else:
+                    notify("Bluetooth", "Connect failed (device off or out of range?)")
+            self.refresh(force=True)
+
+        return action
+
+    def _bt_forget(self, mac, name):
+        def action():
+            ok, msg = Bluetooth.forget(mac)
+            notify("Bluetooth", f"{msg}: {name}")
+            self.refresh(force=True)
+
+        return action
+
+    def _bt_pair(self, mac, name):
+        def action():
+            ok, msg = Bluetooth.pair(mac, name)
+            notify("Bluetooth", msg if ok else msg)
+            self.refresh(force=True)
+
+        return action
+
+    def refresh_bluetooth(self):
+        self._set(self.hdr_icon, ICONS["bluetooth"])
+        powered = Bluetooth.powered()
+        if powered is None:
+            self._set(self.hdr_title, "Bluetooth")
+            self._set(self.hdr_sub, "ADAPTER UNAVAILABLE")
+            self._fill("status", None, ("none",), lambda: [label("Bluetooth service is not responding.", "hint")])
+            return
+        self._set(self.hdr_title, "Bluetooth")
+        self._set_safe(self.power_switch, powered)
+
+        paired = Bluetooth.paired()
+        known = Bluetooth.known()
+        if paired is None or known is None:
+            self._set(self.hdr_sub, f"ADAPTER BUSY {DOT} RETRYING")
+            return
+        if not powered:
+            self._set(self.hdr_sub, "OFF")
+            self._fill("status", None, ("off",), lambda: [label("Turn the switch on to see paired devices.", "hint")])
+            self._fill("paired", "paired devices", ("off",), lambda: [])
+            self._fill("others", "other devices", ("off",), lambda: [])
+            return
+
+        others = [d for d in known if d[0].upper() not in {p[0].upper() for p in paired}]
+        states = {}
+        for mac, name in paired:
+            info = Bluetooth.info(mac) or {}
+            states[mac] = (info.get("Connected"), info.get("Battery Percentage"))
+        # Android-style header: a connected device takes the title line, and
+        # the status line is an uppercase, letter-spaced summary.
+        connected_name = next(
+            (name for mac, name in paired if states[mac][0] == "yes"), None
+        )
+        self._set(self.hdr_title, connected_name or "Bluetooth")
+        if connected_name:
+            self._set(self.hdr_sub, "CONNECTED")
+        else:
+            self._set(
+                self.hdr_sub,
+                "ON"
+                + (f" {DOT} {len(paired)} PAIRED" if paired else f" {DOT} NO PAIRED DEVICES")
+                + (f" {DOT} {len(others)} IN RANGE" if others else ""),
+            )
+        self._fill("status", None, ("on",), lambda: [])
+
+        def paired_rows():
+            if not paired:
+                return [label("No paired devices yet - pair one, then Scan.", "hint")]
+            rows = []
+            for mac, name in paired:
+                connected, battery = states[mac]
+                is_on = connected == "yes"
+                sub = "Connected" if is_on else "Not connected"
+                if battery and battery.isdigit():
+                    sub += f" {DOT} {battery}%"
+                trailing = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+                trailing.pack_start(
+                    self._flat_button(
+                        ICONS["stop"] if is_on else ICONS["play"],
+                        "Disconnect" if is_on else "Connect",
+                        self._bt_toggle(mac, name, is_on),
+                    ),
+                    False,
+                    False,
+                    0,
+                )
+                trailing.pack_start(
+                    self._flat_button(
+                        ICONS["trash"], "Forget device", self._bt_forget(mac, name), danger=True
+                    ),
+                    False,
+                    False,
+                    0,
+                )
+                rows.append(
+                    self._row(
+                        ICONS["link"] if is_on else ICONS["bluetooth"],
+                        name,
+                        sub,
+                        active=is_on,
+                        on_activate=self._bt_toggle(mac, name, is_on),
+                        trailing=trailing,
+                    )
+                )
+            return [self._list(rows)]
+
+        self._fill(
+            "paired",
+            "paired devices",
+            tuple((mac, name) + states[mac] for mac, name in paired),
+            paired_rows,
+        )
+
+        def others_rows():
+            if not others:
+                return []
+            rows = []
+            for mac, name in others:
+                trailing = Gtk.Box()
+                trailing.pack_start(
+                    self._flat_button(ICONS["check"], "Pair device", self._bt_pair(mac, name)),
+                    False,
+                    False,
+                    0,
+                )
+                rows.append(self._row(ICONS["bluetooth"], name, "Not paired", trailing=trailing))
+            return [self._list(rows)]
+
+        self._fill("others", "other devices", tuple(others), others_rows)
+
+    # -- wifi -------------------------------------------------------------
+
+    def _init_wifi(self, _footer):
+        self.power_switch = self._switch(self._wifi_power)
+        self.hdr_end.pack_end(self.power_switch, False, False, 0)
+        if shutil.which("qrencode"):
+            self.qr_btn = self._sq_button(ICONS["qrcode"], "Show QR code", self._show_qr)
+            self.hdr_end.pack_end(self.qr_btn, False, False, 0)
+        self.footer_idle_text = "Rescan"
+        self._footer_button(ICONS["refresh"], self.footer_idle_text, self._wifi_rescan)
+        self._build_password_form()
+        self._build_dns()
+        self._build_qr_view()
+        self._dns_busy = False
+
+    # -- wifi: dns / qr ----------------------------------------------------
+
+    DNS_PROVIDERS = (
+        ("DHCP", []),
+        ("Cloudflare", ["1.1.1.1", "1.0.0.1"]),
+        ("Google", ["8.8.8.8", "8.8.4.4"]),
+        ("Custom", None),
+    )
+
+    def _build_dns(self):
+        box = self._region("dns", "dns provider")
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.dns_btns = {}
+        for name, _ips in self.DNS_PROVIDERS:
+            btn = Gtk.Button()
+            btn.set_label(name)
+            btn.get_style_context().add_class("pill")
+            btn.set_hexpand(True)
+            btn.set_sensitive(False)  # enabled once a Wi-Fi link is up
+            btn.connect("clicked", lambda _b, n=name: self._set_dns_profile(n))
+            self.dns_btns[name] = btn
+            row.pack_start(btn, True, True, 0)
+        box.pack_start(row, False, False, 0)
+        # Custom resolvers go through a one-line form (same entry style as the
+        # password prompt), hidden until Custom is clicked.
+        self.dns_entry = Gtk.Entry()
+        self.dns_entry.set_placeholder_text("e.g. 9.9.9.9 149.112.112.112")
+        self.dns_entry.connect("activate", lambda *_a: self._custom_dns_apply())
+        custom_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        custom_row.pack_start(self.dns_entry, True, True, 0)
+        custom_row.pack_start(
+            self._pill_button("Cancel", self._custom_dns_cancel), False, False, 0
+        )
+        custom_row.pack_start(
+            self._pill_button("Apply", self._custom_dns_apply), False, False, 0
+        )
+        custom_row.set_no_show_all(True)
+        box.pack_start(custom_row, False, False, 2)
+        self.custom_box = custom_row
+        self.regions["dns"][0].set_visible(True)
+
+    def _build_qr_view(self):
+        """In-panel QR swap view: body hides, QR shows, Done restores."""
+        self.qr_view = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.qr_view.set_no_show_all(True)
+        self.qr_view.set_halign(Gtk.Align.CENTER)
+        self.qr_name = label("", "hdr-title")
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        card.get_style_context().add_class("qr-card")
+        self.qr_image = Gtk.Image()
+        card.pack_start(self.qr_image, False, False, 0)
+        self.qr_view.pack_start(self.qr_name, False, False, 0)
+        self.qr_view.pack_start(card, False, False, 0)
+        self.qr_view.pack_start(
+            label("Scan to join this network", "hint"), False, False, 0
+        )
+        done = self._pill_button("Done", self._hide_qr)
+        done.set_halign(Gtk.Align.CENTER)
+        self.qr_view.pack_start(done, False, False, 0)
+        self.outer.pack_start(self.qr_view, False, False, 0)
+
+    @staticmethod
+    def _qr_escape(text):
+        for ch in ("\\", ";", ",", ":", '"'):
+            text = text.replace(ch, "\\" + ch)
+        return text
+
+    def _show_qr(self):
+        con = Wifi.active_ssid()
+        if not con:
+            notify("Wi-Fi", "Connect to a network first")
+            return
+        rc, out, _ = run(
+            ["nmcli", "-s", "-g", "802-11-wireless-security.key-mgmt",
+             "connection", "show", con],
+            timeout=8,
+        )
+        secured = rc == 0 and out.strip() not in ("", "none")
+        psk = ""
+        if secured:
+            rc, out, _ = run(
+                ["nmcli", "-s", "-g", "802-11-wireless-security.psk",
+                 "connection", "show", con],
+                timeout=10,
+            )
+            psk = out.strip().strip('"')
+            if not psk:
+                notify("Wi-Fi", "No stored password to encode")
+                return
+        body = f"T:{'WPA' if secured else 'nopass'};S:{self._qr_escape(con)}"
+        if psk:
+            body += f";P:{self._qr_escape(psk)}"
+        path = os.path.join(
+            os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "kox-panel-qr.png"
+        )
+        rc, _out, _err = run(
+            ["qrencode", "-o", path, "-s", "7", "-m", "2", "-l", "M", f"WIFI:{body};;"],
+            timeout=10,
+        )
+        if rc != 0:
+            notify("Wi-Fi", "QR generation failed")
+            return
+        self.qr_image.set_from_file(path)
+        self.qr_name.set_text(con)
+        self.body.hide()
+        self.footer.hide()
+        self.qr_mode = True
+        self.qr_view.set_no_show_all(False)
+        self.qr_view.show_all()
+
+    def _hide_qr(self):
+        self.qr_mode = False
+        self.qr_view.set_no_show_all(True)
+        self.qr_view.hide()
+        self.body.show()
+        self.footer.show()
+
+    def _dns_active(self, details):
+        if not details or not details["con"]:
+            return None
+        found = set(details["dns"])
+        if found == {"1.1.1.1", "1.0.0.1"}:
+            return "Cloudflare"
+        if found == {"8.8.8.8", "8.8.4.4"}:
+            return "Google"
+        if details["ignore"] and found:
+            return "Custom"
+        return "DHCP"
+
+    def _dns_mark(self, name):
+        for key, btn in self.dns_btns.items():
+            ctx = btn.get_style_context()
+            if key == name:
+                ctx.add_class("active")
+            else:
+                ctx.remove_class("active")
+
+    def _set_dns_profile(self, name):
+        if self._dns_busy:
+            return
+        if name == "Custom":
+            self.custom_box.set_no_show_all(False)
+            self.custom_box.show_all()
+            self.dns_entry.grab_focus()
+            return
+        self.custom_box.hide()
+        details = Wifi.link_details()
+        if not details or not details["con"]:
+            return
+        ips = dict(self.DNS_PROVIDERS)[name]
+        self._dns_busy = True
+
+        def work():
+            ok = Wifi.set_dns(details["con"], ips)
+            GLib.idle_add(self._dns_done, name, ok)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _dns_done(self, name, ok):
+        self._dns_busy = False
+        notify("Wi-Fi", f"DNS: {name}" if ok else f"Could not set DNS to {name}")
+        if self.is_open:
+            self.refresh(force=True)
+        return False
+
+    def _custom_dns_apply(self):
+        if self._dns_busy:
+            return
+        details = Wifi.link_details()
+        if not details or not details["con"]:
+            return
+        ips = [t for t in self.dns_entry.get_text().replace(",", " ").split() if t]
+        bad = [t for t in ips if not re.match(r"^\d+\.\d+\.\d+\.\d+$", t)]
+        if not ips or bad:
+            notify("Wi-Fi", "Enter IP addresses like 9.9.9.9")
+            return
+        self.custom_box.hide()
+        self._dns_busy = True
+
+        def work():
+            ok = Wifi.set_dns(details["con"], ips)
+            GLib.idle_add(self._dns_done, "Custom", ok)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _custom_dns_cancel(self):
+        self.custom_box.hide()
+
+    def _build_password_form(self):
+        self.form_title = label("", "row-name")
+        self.password_entry = Gtk.Entry()
+        self.password_entry.set_visibility(False)
+        self.password_entry.set_placeholder_text("Network password")
+        self.password_entry.connect("activate", lambda *_a: self._password_submit())
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        buttons.set_halign(Gtk.Align.END)
+        cancel = self._pill_button("Cancel", self._password_cancel)
+        join = self._pill_button("Connect", self._password_submit)
+        buttons.pack_start(cancel, False, False, 0)
+        buttons.pack_start(join, False, False, 0)
+        self.form.pack_start(self.form_title, False, False, 4)
+        self.form.pack_start(self.password_entry, False, False, 2)
+        self.form.pack_start(buttons, False, False, 2)
+
+    def _wifi_power(self, want):
+        if Wifi.set_radio(want):
+            notify("Wi-Fi", "Wi-Fi on" if want else "Wi-Fi off")
+        else:
+            notify("Wi-Fi", "Could not turn Wi-Fi " + ("on" if want else "off"))
+
+    def _wifi_rescan(self):
+        if self.scanning:
+            return
+        self._scanning(True)
+
+        def work():
+            Wifi.scan_list(rescan=True)
+            GLib.idle_add(self._scan_finished)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _wifi_toggle(self, net):
+        def action():
+            if self.wifi_busy:
+                return
+            if net["in_use"]:
+                self._disconnect_wifi()
+                return
+            # A secured network without a saved profile needs a password before
+            # nmcli can do anything useful. Ask for it first, with the list
+            # still visible, instead of starting a doomed connect attempt.
+            if net.get("security") not in ("", "--") and not Wifi.has_profile(net["ssid"]):
+                self._open_password(net["ssid"])
+                return
+            self._connect_wifi(net["ssid"])
+
+        return action
+
+    def _connect_wifi(self, ssid, password=None):
+        if self.wifi_busy:
+            return
+        self.wifi_busy = True
+        self._set(self.hdr_title, ssid)
+        self._set(self.hdr_sub, "Connecting…")
+
+        def work():
+            ok, msg, needs_password = Wifi.connect(ssid, password)
+            GLib.idle_add(
+                self._wifi_connect_done, ssid, password, ok, msg, needs_password
+            )
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _wifi_connect_done(self, ssid, password, ok, msg, needs_password):
+        self.wifi_busy = False
+        if needs_password:
+            if self.is_open:
+                if password is not None:
+                    notify("Wi-Fi", f"Could not connect to {ssid}")
+                self._open_password(ssid)
+            else:
+                notify("Wi-Fi", f"Password required for {ssid}")
+            return
+        notify(
+            "Wi-Fi",
+            msg or (f"Connected to {ssid}" if ok else f"Could not connect to {ssid}"),
+        )
+        if self.is_open:
+            self.refresh(force=True)
+
+    def _disconnect_wifi(self):
+        if self.wifi_busy:
+            return
+        self.wifi_busy = True
+        self._set(self.hdr_sub, "Disconnecting…")
+
+        def work():
+            ok = Wifi.disconnect()
+            GLib.idle_add(self._wifi_disconnect_done, ok)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _wifi_disconnect_done(self, ok):
+        self.wifi_busy = False
+        notify("Wi-Fi", "Disconnected" if ok else "Could not disconnect")
+        if self.is_open:
+            self.refresh(force=True)
+
+    def _wifi_forget(self, ssid):
+        def action():
+            notify("Wi-Fi", f"Forgot {ssid}" if Wifi.forget(ssid) else f"Could not forget {ssid}")
+            self.refresh(force=True)
+
+        return action
+
+    def _open_password(self, ssid):
+        self.password_for = ssid
+        self.form_title.set_text(f"Password for {ssid}")
+        self.password_entry.set_text("")
+        # Keep the network lists visible. Hiding every region here made a
+        # secured network look like it had emptied the panel.
+        # The form was created no_show_all so the initial panel show_all()
+        # cannot flash it. Clear that before explicitly showing the prompt;
+        # otherwise show_all() here is a no-op and the user gets no prompt.
+        self.form.set_no_show_all(False)
+        self.form.show_all()
+        # NONE is what makes click-away work, but a Gtk.Entry cannot be typed
+        # into without keyboard interactivity. ON_DEMAND is enabled only for
+        # the lifetime of this prompt; the focus/cursor watchers are paused
+        # while password_for is set.
+        GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.ON_DEMAND)
+        self.password_entry.grab_focus()
+
+    def _close_password(self, refresh=True):
+        self.password_for = None
+        self.password_entry.set_text("")
+        self.form.hide()
+        self.form.set_no_show_all(True)
+        GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.NONE)
+        if refresh:
+            self.refresh(force=True)
+
+    def _password_submit(self):
+        if not self.password_for:
+            return
+        ssid, password = self.password_for, self.password_entry.get_text()
+        if not password:
+            notify("Wi-Fi", "Enter the network password")
+            return
+        self._close_password(refresh=False)
+        self._connect_wifi(ssid, password)
+
+    def _password_cancel(self):
+        self._close_password()
+
+    def refresh_wifi(self):
+        if self.wifi_busy:
+            return  # keep the last list and the "Connecting…" header
+        on = Wifi.radio_on()
+        self._set_safe(self.power_switch, on)
+        self._set(self.hdr_icon, ICONS["wifi_s4"] if on else ICONS["wifi_off"])
+        active = Wifi.active_ssid()
+        details = Wifi.link_details() if on else None
+        connected = bool(details and details["con"])
+        if active:
+            self._set(self.hdr_title, active)
+            self._set(self.hdr_sub, "CONNECTED")
+        elif on is False:
+            self._set(self.hdr_title, "Wi-Fi")
+            self._set(self.hdr_sub, "OFF")
+            self._regions_off()
+            return
+        else:
+            self._set(self.hdr_title, "Wi-Fi")
+            self._set(self.hdr_sub, "NOT CONNECTED")
+        if self.password_for:
+            return  # never rebuild under an open prompt
+
+        # Stats are gone; DNS lives only while a Wi-Fi link exists.
+        self.regions["dns"][1].set_visible(connected)
+        if connected:
+            self._dns_mark(self._dns_active(details))
+            for btn in self.dns_btns.values():
+                btn.set_sensitive(True)
+        else:
+            self._dns_mark(None)
+            for btn in self.dns_btns.values():
+                btn.set_sensitive(False)
+            self.custom_box.hide()
+
+        saved = Wifi.saved()
+        scans = Wifi.scan_list()
+        if saved is None or scans is None:
+            self._set(self.hdr_sub, "NETWORKMANAGER BUSY")
+            return
+
+        by_ssid = {net["ssid"]: net for net in scans}
+        saved_names = {ssid for ssid, _ in saved}
+        others = [net for net in scans if net["ssid"] not in saved_names]
+
+        # Minimal: no explainer sentences - the lists speak for themselves.
+        self._fill("status", None, ("on", bool(others)), lambda: [])
+
+        def known_rows():
+            if not saved:
+                return [label("No saved networks", "hint")]
+            rows = []
+            for ssid, device in saved:
+                net = by_ssid.get(
+                    ssid, {"ssid": ssid, "in_use": False, "signal": 0, "security": ""}
+                )
+                in_use = bool(net.get("in_use"))
+                secured = net.get("security") not in ("", "--")
+                sub = "Connected" if in_use else ("In range" if ssid in by_ssid else "Not in range")
+                # The reference panel keeps rows clean: name + status, a lock
+                # glyph on secured networks, and Forget reachable (quietly)
+                # on rows that are not the active link. Connect/disconnect
+                # rides on the row itself.
+                trailing = None
+                if not in_use or secured:
+                    trailing = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+                    if not in_use:
+                        trailing.pack_start(
+                            self._flat_button(
+                                ICONS["trash"],
+                                "Forget network",
+                                self._wifi_forget(ssid),
+                                danger=True,
+                            ),
+                            False,
+                            False,
+                            0,
+                        )
+                    if secured:
+                        trailing.pack_start(label(ICONS["lock"], "row-trail"), False, False, 0)
+                rows.append(
+                    self._row(
+                        ICONS["wifi_s4"] if in_use else self._strength_icon(net.get("signal", 0)),
+                        ssid,
+                        sub,
+                        active=in_use,
+                        on_activate=self._wifi_toggle(net),
+                        trailing=trailing,
+                    )
+                )
+            return [self._list(rows)]
+
+        self._fill(
+            "known",
+            "known networks",
+            tuple(
+                (ssid, device, by_ssid.get(ssid, {}).get("in_use"), by_ssid.get(ssid, {}).get("security"))
+                for ssid, device in sorted(saved)
+            ),
+            known_rows,
+        )
+
+        def others_rows():
+            if not others:
+                return []
+            rows = []
+            for net in others:
+                secured = net["security"] not in ("", "--")
+                # Name-only rows like the reference panel: the signal glyph
+                # carries the level, the lock says "secured", the row itself
+                # joins the network.
+                rows.append(
+                    self._row(
+                        self._strength_icon(net["signal"]),
+                        net["ssid"],
+                        "",
+                        on_activate=self._wifi_toggle(net),
+                        trailing=label(ICONS["lock"], "row-trail") if secured else None,
+                    )
+                )
+            return [self._list(rows)]
+
+        self._fill(
+            "others",
+            "other networks",
+            tuple((n["ssid"], n["signal"], n["security"]) for n in others),
+            others_rows,
+        )
+
+    @staticmethod
+    def _strength_icon(pct):
+        """Android quarter-fan glyph for a signal percentage."""
+        try:
+            pct = int(pct)
+        except (TypeError, ValueError):
+            pct = 0
+        if pct >= 75:
+            return ICONS["wifi_s4"]
+        if pct >= 50:
+            return ICONS["wifi_s3"]
+        if pct >= 25:
+            return ICONS["wifi_s2"]
+        return ICONS["wifi_s1"]
+
+    def _regions_off(self):
+        self.regions["dns"][1].set_visible(False)
+        self._fill("status", None, ("off",), lambda: [])
+        self._fill("known", "known networks", ("off",), lambda: [])
+        self._fill("others", "other networks", ("off",), lambda: [])
+
+    # -- battery ----------------------------------------------------------
+
+    def _init_battery(self, _footer):
+        # Android-style header: the percentage IS the title, with the status
+        # line under it. The old big-% + progress-bar pair is gone with that
+        # layout; sliders keep their own sections.
+
+        # Power-profile pills need a reachable power-profiles-daemon, not just
+        # the CLI binary (OpenRC: dbus activation does not start it). Probe
+        # once at build time; without a working daemon the section is not
+        # built at all: pills that can only ever error are worse than none.
+        self.profile_btns = {}
+        if shutil.which("powerprofilesctl") and Power.profile() is not None:
+            profiles = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            for name, glyph in (
+                ("performance", ICONS["tachometer"]),
+                ("balanced", ICONS["adjust"]),
+                ("power-saver", ICONS["carrot"]),
+            ):
+                btn = Gtk.Button()
+                btn.set_relief(Gtk.ReliefStyle.NONE)
+                box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=7)
+                box.set_margin_start(4)
+                box.set_margin_end(4)
+                box.pack_start(label(glyph), False, False, 0)
+                box.pack_start(label(name.replace("-", " ").title()), False, False, 0)
+                btn.add(box)
+                btn.get_style_context().add_class("pill")
+                btn.set_hexpand(True)
+                btn.connect("clicked", lambda _b, n=name: self._set_profile(n))
+                self.profile_btns[name] = btn
+                profiles.pack_start(btn, True, True, 0)
+            profiles_region = self._region("profiles", "power profile")
+            self.body.reorder_child(profiles_region, 0)
+            profiles_region.pack_start(profiles, False, False, 0)
+            self.regions["profiles"][0].set_visible(True)
+
+        self.bright_scale, self.bright_val = self._slider(ICONS["sun"], self._set_brightness)
+        self.vol_scale, self.vol_val = self._slider(ICONS["volume"], self._set_volume)
+        self.mute_btn = self._flat_button(ICONS["volume_mute"], "Mute / unmute", self._mute_toggle)
+        self._slider_row("brightness", "brightness", ICONS["sun"], self.bright_scale, self.bright_val)
+        self._slider_row("volume", "volume", ICONS["volume"], self.vol_scale, self.vol_val, self.mute_btn)
+
+    def _slider(self, _glyph, on_change):
+        val = label("", "row-sub", xalign=1.0)
+        val.set_width_chars(5)
+        scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
+        scale.set_draw_value(False)
+        scale.set_hexpand(True)
+        scale.set_valign(Gtk.Align.CENTER)
+        scale.connect("value-changed", lambda s: on_change(s.get_value()))
+        return scale, val
+
+    def _slider_row(self, key, title, glyph, scale, val, extra=None):
+        box = self._region(key, title)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=9)
+        row.pack_start(label(glyph, "row-icon"), False, False, 0)
+        row.pack_start(scale, True, True, 0)
+        row.pack_end(val, False, False, 0)
+        if extra:
+            row.pack_end(extra, False, False, 0)
+        box.pack_start(row, False, False, 0)
+        self.regions[key][0].set_visible(True)
+
+    def _set_profile(self, name):
+        if Power.profile() == name:
+            return
+        ok, detail = Power.set_profile(name)
+        notify("Power", f"Power profile: {name}" if ok else f"Could not set profile: {detail}")
+        self.refresh(force=True)
+
+    def _set_brightness(self, value):
+        if self.syncing:
+            return
+        self._set(self.bright_val, f"{int(value)}%")
+        Power.set_brightness(value)
+
+    def _set_volume(self, value):
+        if self.syncing:
+            return
+        self._set(self.vol_val, f"{int(value)}%")
+        Power.set_volume(value)
+
+    def _mute_toggle(self):
+        if run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"], timeout=8)[0] == 0:
+            notify("Audio", "Mute toggled")
+        self.refresh(force=True)
+
+    def refresh_battery(self):
+        self._set(self.hdr_icon, ICONS["battery_full"])
+        bat = Power.battery()
+        if not bat:
+            self._set(self.hdr_title, "Battery")
+            self._set(self.hdr_sub, "NO BATTERY DETECTED")
+            return
+        pct, status, left = bat
+        icon = (
+            ICONS["battery_full"]
+            if pct >= 90
+            else ICONS["battery_half"]
+            if pct >= 45
+            else ICONS["battery_empty"]
+        )
+        charging = status.lower() in ("charging", "full")
+        if charging:
+            icon = ICONS["battery_bolt"]
+        self._set(self.hdr_icon, icon)
+        self._set(self.hdr_title, f"{pct}%")
+        left_text = human_minutes(left)
+        if status.lower() == "full":
+            sub = "FULLY CHARGED"
+        elif charging:
+            sub = "CHARGING" + (
+                f" {DOT} {left_text.replace('left', 'until full').upper()}" if left_text else ""
+            )
+        else:
+            sub = "ON BATTERY" + (f" {DOT} {left_text.upper()}" if left_text else "")
+        self._set(self.hdr_sub, sub)
+
+        active = Power.profile() if self.profile_btns else None
+        for name, btn in self.profile_btns.items():
+            ctx = btn.get_style_context()
+            if name == active:
+                ctx.add_class("active")
+            else:
+                ctx.remove_class("active")
+
+        brightness = Power.brightness()
+        if brightness is not None:
+            self.syncing = True
+            self.bright_scale.set_value(brightness)
+            self.syncing = False
+            self._set(self.bright_val, f"{brightness}%")
+        volume = Power.volume()
+        if volume is not None:
+            self.syncing = True
+            self.vol_scale.set_value(volume[0])
+            self.syncing = False
+            self._set(self.vol_val, f"{volume[0]}%" + (f" {DOT} mute" if volume[1] else ""))
+            self.mute_btn.get_child().set_text(ICONS["volume"] if volume[1] else ICONS["volume_mute"])
+
+    # -- entry point ------------------------------------------------------
+
+    def refresh(self, force=False):
+        if self.password_for:
+            return
+        if force:
+            for entry in self.regions.values():
+                entry[2] = None
+        {
+            "bluetooth": self.refresh_bluetooth,
+            "wifi": self.refresh_wifi,
+            "battery": self.refresh_battery,
+        }[self.mode]()
+
+
+# -- daemon -------------------------------------------------------------------
+#
+# Why: every bar click used to fork a fresh interpreter that had to import
+# PyGObject/GTK (~210ms), parse the stylesheet (~55ms) and build the widget
+# tree while reading nmcli/bluetoothctl/upower (150-300ms) before the first
+# frame -- a 420-570ms dead gap between press and window, which is what made
+# these menus feel heavier than an Omarchy bar. The daemon pays that once at
+# session start and keeps the three panels built, so a click is a socket write
+# plus a map().
+
+class Daemon:
+    def __init__(self, path):
+        self.path = path
+        self.panels = {}
+        self.server = None
+        self.lock = None
+        self.ready = False
+        self.pending = None
+        self._switching = False
+        self.focus_origin = None
+        self.last_focus_addr = None
+        self.focus_settle_at = 0.0
+
+    def acquire_lock(self):
+        self.lock = open(self.path + ".lock", "w")
+        try:
+            import fcntl
+
+            fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (ImportError, OSError):
+            return False  # a daemon is already serving this socket
+        return True
+
+    def listen(self):
+        # Bound before the panels are built: the socket has to exist from the
+        # first instant after login, otherwise a click in that window would
+        # miss the daemon and spawn a second, standalone panel next to it.
+        try:
+            os.unlink(self.path)
+        except OSError:
+            pass
+        self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.server.bind(self.path)
+        os.chmod(self.path, 0o600)
+        self.server.listen(16)
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        """Blocking accept loop on a helper thread.
+
+        Deliberately not a GLib IO watch: handing a Python socket to
+        GLib.io_add_watch makes PyGObject adopt the fd and close it out from
+        under the Python object, which strands the listener (every later
+        connect then fails with ECONNREFUSED) and leaves the main loop spinning
+        on a dead fd. A thread plus GLib.idle_add keeps GTK work on the main
+        thread and the socket owned by exactly one thing.
+        """
+        while True:
+            try:
+                conn, _ = self.server.accept()
+            except OSError:
+                return
+            try:
+                conn.settimeout(1.0)
+                payload = conn.recv(64).decode(errors="replace").strip()
+            except OSError:
+                payload = ""
+            finally:
+                conn.close()
+            parts = payload.split()
+            mode = parts[0] if parts else ""
+            click = None
+            if len(parts) >= 3:
+                try:
+                    click = (int(parts[1]), int(parts[2]))
+                except ValueError:
+                    click = None
+            # Validate against MODES, not self.panels: the socket is bound
+            # before build() runs (so a click during the ~1s startup is not
+            # lost), and during that window self.panels is still empty, which
+            # silently dropped the request and left the bar button dead.
+            if mode in MODES:
+                GLib.idle_add(self._dispatch, mode, click)
+
+    def _dispatch(self, mode, click=None):
+        if self.ready:
+            self.toggle(mode, click)
+        else:
+            self.pending = (mode, click)  # building: honour it when ready
+        return False
+
+    def prewarm(self, panel):
+        """Realise the window now, at session start, so the very first click
+        does not pay GTK's one-time cost (font loading, stylesheet, layer
+        surface creation -- ~80ms on the wifi panel, ~0 on later opens).
+
+        Done with keyboard interactivity off and immediately hidden, so the
+        real user never sees a flash or loses the keyboard at login.
+        """
+        restore = GtkLayerShell.KeyboardMode.NONE
+        try:
+            GtkLayerShell.set_keyboard_mode(panel, GtkLayerShell.KeyboardMode.NONE)
+            panel.show_all()
+            panel.hide()
+        except Exception as exc:  # a failed prewarm only costs first-click lag
+            sys.stderr.write(f"kox-panel: prewarm failed for {panel.mode}: {exc}\n")
+        finally:
+            GtkLayerShell.set_keyboard_mode(panel, restore)
+
+    def build(self):
+        load_css()
+        for mode in MODES:
+            panel = Panel(mode, None, warm=True)
+            # Drop the panel whenever the last one goes away, however it went
+            # away (toggle, Escape, click-away), so the focus watcher below
+            # stops acting on a panel that is no longer on screen.
+            panel.connect("unmap-event", lambda *_a: self._on_panel_unmap())
+            self.panels[mode] = panel
+        for mode, panel in self.panels.items():
+            self.prewarm(panel)
+        # Fill the labels now so the very first click paints real data rather
+        # than empty rows. Costs a few hundred ms once, at session start.
+        for mode, panel in self.panels.items():
+            try:
+                panel.refresh(force=True)
+            except Exception as exc:  # a broken probe must not kill the daemon
+                sys.stderr.write(f"kox-panel: warm refresh failed for {mode}: {exc}\n")
+
+    def toggle(self, mode, click=None):
+        self._switching = True
+        try:
+            for name, panel in self.panels.items():
+                if name != mode and panel.is_open:
+                    panel.close()
+        finally:
+            self._switching = False
+        panel = self.panels[mode]
+        if panel.is_open:
+            self.close_all()  # second click on the same bar button closes it
+        else:
+            panel.show_panel(click)
+            # Remember which window had focus when this panel opened. Any later
+            # focus change means the user clicked somewhere else, which is the
+            # signal to dismiss.
+            #
+            # last_focus_addr can still be None this early in the session: the
+            # watcher only learns addresses from events, and none may have
+            # arrived yet. Using None as the origin made _maybe_click_away bail
+            # out on its very first line forever, so the panel became
+            # impossible to dismiss by clicking away. Ask the compositor
+            # directly instead of trusting that an event happened to arrive.
+            self.focus_origin = self.last_focus_addr or self._query_focus_addr()
+            # Grace period. focus_follows_mouse is on, so mapping the panel can
+            # itself make Hyprland re-evaluate which window is active and emit an
+            # activewindow event. Without a settle window that first event looks
+            # exactly like the user clicking elsewhere, and the panel closes the
+            # instant it opens. Ignore focus churn for a moment after opening.
+            self.focus_settle_at = time.monotonic() + 0.35
+
+    def close_all(self):
+        self._switching = True
+        try:
+            for panel in self.panels.values():
+                if panel.is_open:
+                    panel.close()
+        finally:
+            self._switching = False
+        self.focus_origin = None
+
+    def _on_panel_unmap(self):
+        if self._switching:
+            return
+        if not any(panel.is_open for panel in self.panels.values()):
+            self.focus_origin = None
+
+    # -- click-away via Hyprland's focus events --------------------------
+    #
+    # GTK's own focus-out is useless here: this panel is a layer-shell surface,
+    # and GTK keeps reporting has_toplevel_focus() == True even after Hyprland
+    # has moved the real keyboard focus to another window (verified: no
+    # focus-out-event is ever emitted, and the poll sees has_focus stay True
+    # across a genuine focus steal). So a full-screen scrim was used instead --
+    # which does close the panel, but swallows the click that was supposed to
+    # reach the window underneath, so you had to click twice.
+    #
+    # Hyprland's event socket reports activewindow/activewindowv2 for every
+    # focus change, including ones caused by clicking another client while this
+    # panel holds the keyboard. That is the signal we want: no surface is placed
+    # over anything, so the click reaches the window you clicked AND the panel
+    # closes. Vanilla Hyprland, no Quickshell required.
+    def _watch_focus(self, attempts=0):
+        # Escape hatch for testing: KOX_PANEL_DISABLE_FOCUS_WATCH=1 runs the
+        # daemon with click-away disabled, which is what proves the watcher is
+        # what closes the panel.
+        if os.environ.get("KOX_PANEL_DISABLE_FOCUS_WATCH"):
+            sys.stderr.write("kox-panel: focus watcher disabled by env\n")
+            return
+        sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+        runtime = os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
+        if not sig:
+            _rc, _out, _err = run(["hyprctl", "instances", "-j"], timeout=5)
+            try:
+                data = json.loads(_out or "[]")
+                sig = data[0].get("instance", "") if data else ""
+            except Exception:
+                sig = ""
+        sock_path = os.path.join(runtime, "hypr", sig, ".socket2.sock")
+        if not sig or not os.path.exists(sock_path):
+            # Retry instead of giving up for the session. This daemon can
+            # start before the compositor in an autostart race, and a single
+            # failed probe used to switch click-away off permanently until
+            # the next login.
+            if attempts < 60:  # ~2 min at a 2s interval
+                GLib.timeout_add_seconds(2, self._watch_focus, attempts + 1)
+            else:
+                sys.stderr.write(
+                    "kox-panel: Hyprland socket never appeared, click-away off\n")
+            return
+
+        def reader():
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                sock.connect(sock_path)
+            except OSError as exc:
+                sys.stderr.write(f"kox-panel: focus watcher connect failed: {exc}\n")
+                return
+            # One line on success: with only failure lines logged, "click-away
+            # is dead" could previously mean env-disabled, daemon-less or
+            # connect-refused with nothing in the log to tell them apart.
+            sys.stderr.write("kox-panel: focus watcher listening\n")
+            buf = b""
+            while True:
+                try:
+                    data_in = sock.recv(4096)
+                except OSError:
+                    return
+                if not data_in:
+                    return
+                buf += data_in
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    text = line.decode(errors="replace")
+                    name, _, payload = text.partition(">>")
+                    if name == "activewindowv2":
+                        # The v2 event carries the window address, which is
+                        # unambiguous. The v1 event only has "class,title" and
+                        # cannot tell two windows of the same class apart.
+                        #
+                        # Normalise the address: this event sends it WITHOUT the
+                        # 0x prefix ("5611f7e32470") while hyprctl's JSON has it
+                        # with ("0x5611f7e32470"). Comparing the two forms
+                        # verbatim never matches, so focus_origin never compared
+                        # equal to the current focus and the panel closed the
+                        # instant it opened instead of on click-away.
+                        addr = payload.strip()
+                        if addr and not addr.startswith("0x"):
+                            addr = "0x" + addr
+                        self.last_focus_addr = addr
+                        GLib.idle_add(self._maybe_click_away)
+
+        threading.Thread(target=reader, daemon=True).start()
+
+    def _query_focus_addr(self):
+        """Ask Hyprland which window is focused right now (one subprocess).
+
+        Only used to seed focus_origin when the watcher has not seen an event
+        yet, so the cost is off the click path in steady state."""
+        rc, out, _err = run(["hyprctl", "activewindow", "-j"], timeout=5)
+        if rc != 0 or not out.strip():
+            return ""
+        try:
+            return str(json.loads(out).get("address", ""))
+        except Exception:
+            return ""
+
+    def _maybe_click_away(self):
+        if self.focus_origin is None:
+            return False
+        if not any(panel.is_open for panel in self.panels.values()):
+            self.focus_origin = None
+            return False
+        # ON_DEMAND keyboard focus for the Wi-Fi password prompt can move the
+        # active window, and an in-flight connection may raise an auth dialog;
+        # neither must dismiss the panel mid-entry.
+        if any(
+            panel.is_open
+            and (
+                getattr(panel, "password_for", None)
+                or getattr(panel, "wifi_busy", False)
+            )
+            for panel in self.panels.values()
+        ):
+            return False
+        if self.focus_settle_at and time.monotonic() < self.focus_settle_at:
+            return False  # still settling after the panel appeared
+        if self.last_focus_addr == self.focus_origin:
+            return False
+        # Focus genuinely moved elsewhere: the user clicked another window (or
+        # switched workspace). Adopting the new address as the origin means a
+        # run of focus events closes the panel once, not once per event.
+        self.focus_origin = self.last_focus_addr
+        self.close_all()
+        return False
+
+
+def daemon_main():
+    path = socket_path()
+    daemon = Daemon(path)
+    if not daemon.acquire_lock():
+        return 0
+    daemon.listen()
+    daemon.build()
+    daemon._watch_focus()
+    daemon.ready = True
+    if daemon.pending:
+        (mode, click), daemon.pending = daemon.pending, None
+        daemon.toggle(mode, click)
+    sys.stderr.write(f"kox-panel: daemon ready on {path}\n")
+
+    def _quit(*_a):
+        # Drop the socket on a clean exit. If the daemon is killed hard the
+        # file survives, but then nothing is listening on it either, so the
+        # client's connect() fails immediately with ECONNREFUSED and it falls
+        # back to building the panel itself. A stale file is never a stall.
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        Gtk.main_quit()
+
+    try:
+        from gi.repository import GLibUnix
+
+        GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, lambda: (_quit(), False)[1])
+        GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, lambda: (_quit(), False)[1])
+        GLibUnix.signal_add(
+            GLib.PRIORITY_DEFAULT,
+            signal.SIGHUP,
+            _reload_css,
+        )
+    except Exception:
+        GLib.unix_signal_add(
+            GLib.PRIORITY_DEFAULT, signal.SIGTERM, lambda: (_quit(), False)[1]
+        )
+        GLib.unix_signal_add(
+            GLib.PRIORITY_DEFAULT, signal.SIGINT, lambda: (_quit(), False)[1]
+        )
+        GLib.unix_signal_add(
+            GLib.PRIORITY_DEFAULT,
+            signal.SIGHUP,
+            _reload_css,
+        )
+    Gtk.main()
+    return 0
+
+
+def main():
+    argv = sys.argv[1:]
+    if argv and argv[0] in ("-d", "--daemon"):
+        return daemon_main()
+    mode = argv[0] if argv else ""
+    if mode not in MODES:
+        sys.stderr.write("usage: kox-panel [--daemon] {bluetooth|wifi|battery}\n")
+        return 2
+
+    # A daemon would already have been answered by the fast path at the top of
+    # this file, so reaching here means there is none. Keep the original
+    # one-process-per-panel behaviour so keyboard binds and a daemon-less
+    # session still work.
+    instance = SingleInstance(mode)
+    if not instance.acquire():
+        return 0  # the click closed an already open panel
+
+    load_css()
+    panel = Panel(mode, instance)
+    panel.connect("destroy", lambda *_a: Gtk.main_quit())
+    # Click-away must not depend on the daemon being alive: when the daemon
+    # is dead (killed, or never started) this standalone panel is what the
+    # bar click opens, and without the same focus watcher the daemon runs,
+    # clicking another window would leave it open forever. A bare Daemon
+    # object is a free watcher host — __init__ allocates nothing (the lock
+    # and the socket belong to daemon_main only), so the shim can never
+    # collide with a daemon that is starting up in parallel.
+    shim = Daemon(socket_path())
+    shim.panels = {mode: panel}
+    panel.connect("unmap-event", lambda *_a: shim._on_panel_unmap())
+    shim._watch_focus()
+    # Same origin/settle bookkeeping Daemon.toggle() does for its own panels:
+    # record where focus is now, then ignore churn while the panel maps.
+    shim.focus_origin = shim.last_focus_addr or shim._query_focus_addr()
+    shim.focus_settle_at = time.monotonic() + 0.35
+    try:
+        from gi.repository import GLibUnix
+
+        GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, lambda: (panel.destroy(), False)[1])
+    except Exception:
+        GLib.unix_signal_add(
+            GLib.PRIORITY_DEFAULT, signal.SIGTERM, lambda: (panel.destroy(), False)[1]
+        )
+    Gtk.main()
+    instance.release()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
