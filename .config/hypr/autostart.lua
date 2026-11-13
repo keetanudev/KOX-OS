@@ -7,8 +7,22 @@ hl.on("hyprland.start", function()
     -- Export session env into dbus activation env (OpenRC: no systemd import)
     hl.exec_cmd("dbus-update-activation-environment --all")
 
-    -- Status bar
-    hl.exec_cmd("waybar")
+    -- UI scale: re-apply the stored state once per session. Consumer
+    -- configs persist on disk, so on a normal boot this is a byte-level
+    -- no-op (~100 ms); it exists so drift (engine curve changes, manual
+    -- edits) self-heals at every boot instead of showing as a stale UI.
+    hl.exec_cmd("kox-scale apply")
+
+    -- Status bar: guarded start (one-shot supervisor — waybar has been
+    -- seen to lose the cold-boot race and die silently while every other
+    -- autostart item survived; the guard waits for the Wayland socket,
+    -- retries bounded, then exits. No daemon.)
+    hl.exec_cmd("kox-waybar-autostart")
+
+    -- Bluetooth widget daemon: polls BT state, writes one JSON state file
+    -- and signals waybar so both BT widgets re-render in lockstep (keeps
+    -- the clock notch perfectly still across connect/disconnect).
+    hl.exec_cmd("kox-bt-watcher")
 
     -- Audio: pipewire-pulse (PulseAudio compatibility socket). pipewire +
     -- wireplumber come up as OpenRC user services; the wrapper guards against

@@ -108,17 +108,19 @@ Scope {
                 anchors.centerIn: parent
                 spacing: 24
 
-                // ── clock: big thin hours, smaller minutes, one baseline ──
+                // ── clock: Nothing OS dot-matrix face, big hours ──
                 Text {
                     id: clock
                     anchors.horizontalCenter: parent.horizontalCenter
                     textFormat: Text.RichText
-                    font.family: "JetBrainsMono Nerd Font"
-                    font.weight: Font.ExtraLight
+                    // Ndot 57 — Nothing's classic dot-matrix typeface
+                    // (nothing.tech). Proprietary (community-ripped);
+                    // installed locally — NEVER commit the binary.
+                    font.family: "Ndot 57"
                     property var now: new Date()
-                    text: "<span style=\"font-size:76px; color:#f8f8f2\">"
+                    text: "<span style=\"font-size:190px; color:#f8f8f2\">"
                           + Qt.formatDateTime(now, "HH")
-                          + "</span><span style=\"font-size:44px; color:rgba(248,248,242,0.55)\">"
+                          + "</span><span style=\"font-size:110px; color:rgba(248,248,242,0.55)\">"
                           + Qt.formatDateTime(now, ":mm") + "</span>"
                     Timer {
                         interval: 1000

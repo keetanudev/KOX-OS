@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# kox-bt-watcher: keeps every waybar Bluetooth widget in lockstep.
+#
+# bluetoothctl probes take a variable 200–500 ms, so independently
+# scheduled copies of kox-bluetooth could update seconds apart — which made
+# the clock notch visibly jump when a device connected or disconnected.
+# This daemon polls the state once a second, writes the widget JSON once per
+# change and signals waybar (SIGRTMIN+8) so all modules listening on that
+# signal re-render at the same instant (see "signal": 8 in config.jsonc).
+#
+# The script to observe defaults to the real widget; KOX_BT_SCRIPT overrides
+# it (used by tests).
+set -u
+
+STATE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/kox-bt-state.json"
+BT_SCRIPT="${KOX_BT_SCRIPT:-$HOME/.local/bin/kox/kox-bluetooth}"
+SIGNAL=8 # waybar "signal": 8 → SIGRTMIN+8
+
+# One watcher per session (flock guard, same idea as kox-panel-autostart).
+exec 9>"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/kox-bt-watcher.lock"
+flock -n 9 || exit 0
+
+notify_waybar() {
+  local sig=$(( $(kill -l RTMIN 2>/dev/null || echo 34) + SIGNAL ))
+  local pid
+  for pid in $(pgrep -x waybar 2>/dev/null); do
+    kill -s "$sig" "$pid" 2>/dev/null || true
+  done
+}
+
+last=""
+while true; do
+  cur="$("$BT_SCRIPT" 2>/dev/null || true)"
+  if [[ -n "$cur" && "$cur" != "$last" ]]; then
+    printf '%s\n' "$cur" > "$STATE" 2>/dev/null || true
+    notify_waybar
+    last="$cur"
+  fi
+  sleep 1
+done

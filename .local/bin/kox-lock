@@ -14,6 +14,15 @@
 # (~/.config/hypr/hyprlock.conf) so the session is never left unlocked.
 set -u
 LOCK_QML="$HOME/.config/quickshell/lock.qml"
+RUNTIME="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
+# Guard against double-press: one kox-lock at a time. The fd is held for
+# the whole lock lifetime and released when quickshell/hyprlock exits.
+exec 9>"$RUNTIME/kox-lock.lock"
+if ! flock -n 9; then
+    echo "kox-lock: a lock is already in progress; ignoring" >&2
+    exit 0
+fi
 
 if command -v quickshell >/dev/null 2>&1 && [ -f "$LOCK_QML" ]; then
     quickshell -p "$LOCK_QML"

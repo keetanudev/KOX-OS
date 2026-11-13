@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# kox-waybar-autostart: one-shot session guard for the status bar.
+#
+# waybar is exec'd at the same instant as every other autostart item; on a
+# cold boot it has been seen to lose the race and die before the session
+# settles (every other autostart item survived, the bar alone vanished).
+# This guard waits for the Wayland socket, supervises only the first
+# seconds of the bar's life with bounded retries, then exits — no resident
+# process, same pattern as kox-panel-autostart / kox-pulse-autostart.
+#
+# KOX_WAYBAR_BIN overrides the bar binary (used by tests).
+set -u
+
+runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+WAYBAR_BIN="${KOX_WAYBAR_BIN:-waybar}"
+LOG=/tmp/kox-waybar.log
+
+# Bar already up (fast start beat this guard)? One bar only, exit quietly.
+pgrep -x waybar >/dev/null 2>&1 && exit 0
+
+# The bar must not inherit a stale session env (same contract as the
+# kox-scale restart_waybar leg): re-derive the live Hyprland signature and
+# fall back the DBUS address for whatever env the caller had.
+sig=$(ls "$runtime/hypr" 2>/dev/null | head -n 1)
+[[ -n "$sig" ]] && export HYPRLAND_INSTANCE_SIGNATURE="$sig"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$runtime/bus}"
+
+# Wait for the Wayland socket (cold boot: the compositor may still be
+# laying out outputs). Max ~5 s, then try anyway.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    ls "$runtime" 2>/dev/null | grep -q '^wayland-' && break
+    sleep 0.5
+done
+
+# Supervised start: up to 3 attempts; the bar must survive its first 2 s
+# to count as up. Bounded — the guard always terminates.
+for attempt in 1 2 3; do
+    ( setsid "$WAYBAR_BIN" >>"$LOG" 2>&1 < /dev/null & )
+    sleep 2
+    pgrep -x waybar >/dev/null 2>&1 && exit 0
+    sleep 1
+done
+exit 1

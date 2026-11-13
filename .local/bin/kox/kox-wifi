@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# kox-wifi: KOX OS Waybar Wi-Fi widget.
+#
+# Status (Waybar custom module, return-type json, interval 5):
+#   text     Nerd Font icon by signal strength / state
+#   class    wifi-off | wifi-eth | wifi-idle | wifi-1 .. wifi-4
+#   tooltip  SSID, signal, IP + click hints
+#
+# Actions:
+#   kox-wifi menu     fuzzel picker: visible networks (scan cache), saved
+#                     profiles (connect/forget), disconnect, rescan, radio
+#                     off. The list renders from the scan cache instantly
+#                     (--rescan no) while a fresh scan runs in the background
+#                     for the next open — the fast pattern from the old rice,
+#                     minus its panel bugs.
+#   kox-wifi toggle   Wi-Fi radio on/off
+set -u
+
+ICON_OFF="󰤭"; ICON_IDLE="󰤯"; ICON_ETH="󰈀"
+ICON_1="󰤟"; ICON_2="󰤢"; ICON_3="󰤧"; ICON_4="󰤨"
+
+notify() { notify-send "Wi-Fi" "$1" 2>/dev/null || true; }
+
+json() { # text class tooltip (single line: waybar parses module output per line)
+  jq -cnr --arg t "$1" --arg c "$2" --arg tt "$3" '{text:$t,class:$c,tooltip:$tt}'
+}
+
+active() { # $1 = nmcli connection type -> "NAME<TAB>DEVICE" of first active match
+  nmcli -t -f NAME,TYPE,DEVICE connection show --active 2>/dev/null \
+    | awk -F: -v t="$1" '$2 == t && $3 != "" {print $1 "\t" $3; exit}'
+}
+
+active_wifi() { active "802-11-wireless"; }
+active_eth()  { active "802-3-ethernet"; }
+
+status() {
+  local radio ssid dev sig icon class tt
+  radio="$(nmcli -t -f WIFI g 2>/dev/null || echo missing)"
+
+  if [[ "$radio" != "enabled" ]]; then
+    local note="right-click to enable"
+    [[ "$radio" == "missing" ]] && note="NetworkManager not running"
+    json "$ICON_OFF" "wifi-off" "Wi-Fi off — $note"$'\n'"left-click: menu  right-click: toggle"
+    return
+  fi
+
+  IFS=$'\t' read -r ssid dev <<<"$(active_wifi)"
+  if [[ -z "${ssid:-}" ]]; then
+    local eth
+    eth="$(active_eth)"
+    if [[ -n "$eth" ]]; then
+      json "$ICON_ETH" "wifi-eth" "Ethernet: ${eth%%$'\t'*}"$'\n'"Wi-Fi idle — left-click: networks"
+    else
+      json "$ICON_IDLE" "wifi-idle" "Wi-Fi on, not connected"$'\n'"left-click: networks  right-click: toggle"
+    fi
+    return
+  fi
+
+  sig="$(nmcli -t -f IN-USE,SSID,SIGNAL device wifi list --rescan no 2>/dev/null \
+         | awk -F: -v s="$ssid" '$1 == "*" && $2 == s {print $3; exit}')"
+  [[ -n "${sig:-}" ]] || sig=0
+
+  if   (( sig >= 80 )); then icon="$ICON_4"; class="wifi-4"
+  elif (( sig >= 60 )); then icon="$ICON_3"; class="wifi-3"
+  elif (( sig >= 40 )); then icon="$ICON_2"; class="wifi-2"
+  else                       icon="$ICON_1"; class="wifi-1"
+  fi
+
+  local ip
+  ip="$(nmcli -t -f IP4.ADDRESS device show "$dev" 2>/dev/null | head -1 | cut -d: -f2-)"
+  tt="$ssid — $sig%"$'\n'"IP: ${ip:-none}"$'\n'"left-click: networks  right-click: toggle"
+  json "$icon" "$class" "$tt"
+}
+
+strip_row() { # menu row -> exact SSID (drops "* ", indent, " [lock]/[saved]", " (NN%)")
+  printf '%s' "$1" | sed -E 's/^\* //; s/^ +//; s/ \[[^]]*\]$//; s/ \([0-9]+%\)$//'
+}
+
+connect() { # $1 = SSID, $2 = optional PSK
+  local ssid="$1" psk="${2:-}" out
+  [[ -z "$ssid" ]] && return 0
+  notify "Connecting to $ssid…"
+
+  if nmcli -g NAME connection show 2>/dev/null | grep -Fxq "$ssid"; then
+    out="$(nmcli connection up "$ssid" 2>&1)"
+  else
+    out="$(nmcli device wifi connect "$ssid" 2>&1)"
+  fi
+  if [[ $? -eq 0 ]]; then notify "Connected to $ssid"; return 0; fi
+
+  # Secrets needed -> ask, retry once
+  if [[ "$out" == *ecret* || "$out" == *assword* ]]; then
+    psk="$(fuzzel --dmenu --password --prompt "password: " </dev/null 2>/dev/null)" || return 0
+    out="$(nmcli device wifi connect "$ssid" password "$psk" 2>&1)"
+    [[ $? -eq 0 ]] && { notify "Connected to $ssid"; return 0; }
+  fi
+
+  # Flap: the cache had it but the radio dropped it mid-connect — rescan, retry once
+  if [[ "$out" == *"No network with"* ]]; then
+    nmcli device wifi rescan >/dev/null 2>&1
+    sleep 2
+    if [[ -n "$psk" ]]; then
+      out="$(nmcli device wifi connect "$ssid" password "$psk" 2>&1)"
+    else
+      out="$(nmcli device wifi connect "$ssid" 2>&1)"
+    fi
+    [[ $? -eq 0 ]] && { notify "Connected to $ssid"; return 0; }
+  fi
+
+  notify "Failed: $(printf '%s' "$out" | head -1)"
+}
+
+menu() {
+  local radio
+  radio="$(nmcli -t -f WIFI g 2>/dev/null || echo missing)"
+
+  if [[ "$radio" != "enabled" ]]; then
+    local pick
+    pick="$(printf '%s\n' 'Turn Wi-Fi on' | fuzzel --dmenu --prompt 'Wi-Fi off > ' 2>/dev/null)" || return 0
+    [[ "$pick" == "Turn Wi-Fi on" ]] && { nmcli radio wifi on && notify "Wi-Fi enabled"; }
+    return
+  fi
+
+  # Render the scan cache now; refresh in the background for the next open.
+  nmcli device wifi rescan >/dev/null 2>&1 &
+
+  local cur cur_dev rows saved_rows pick ssid act
+  IFS=$'\t' read -r cur cur_dev <<<"$(active_wifi)"
+  cur="${cur:-}"
+
+  rows="$(nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY device wifi list --rescan no 2>/dev/null \
+    | awk -F: '$2 != "" && $2 != "--" {
+        sec = ($4 == "" || $4 ~ /none/) ? "" : " [lock]"
+        printf "%s%s (%s%%)%s\n", ($1 == "*" ? "* " : "  "), $2, $3, sec
+      }')"
+
+  # Saved wifi profiles not currently visible in the scan
+  saved_rows=""
+  local name visible
+  visible="$(nmcli -t -f SSID device wifi list --rescan no 2>/dev/null | sed '/^$/d')"
+  while IFS= read -r name; do
+    [[ -z "$name" ]] && continue
+    [[ "$name" == "$cur" ]] && continue
+    printf '%s\n' "$visible" | grep -Fxq "$name" || saved_rows+="  $name [saved]"$'\n'
+  done < <(nmcli -t -f NAME,TYPE connection show 2>/dev/null \
+             | awk -F: '$2 == "802-11-wireless" {print $1}')
+
+  pick="$(printf '%s' "$rows" "$saved_rows" \
+            "Rescan networks"$'\n'"Turn Wi-Fi off"${cur:+$'\n'"Disconnect current"} \
+          | sed '/^$/d' | fuzzel --dmenu --prompt 'Wi-Fi > ' 2>/dev/null)" || return 0
+
+  case "$pick" in
+    "Rescan networks")
+      nmcli device wifi rescan >/dev/null 2>&1 && notify "Scanning…" ;;
+    "Turn Wi-Fi off")
+      nmcli radio wifi off && notify "Wi-Fi disabled" ;;
+    "Disconnect current")
+      nmcli device disconnect "$cur_dev" >/dev/null 2>&1 && notify "Disconnected from $cur" ;;
+    *'[saved]')
+      ssid="$(strip_row "$pick")"
+      act="$(printf '%s\n' 'Connect' 'Forget' | fuzzel --dmenu --prompt "$ssid > " 2>/dev/null)" || return 0
+      if [[ "$act" == "Forget" ]]; then
+        nmcli connection delete "$ssid" >/dev/null 2>&1 && notify "Forgot $ssid"
+      else
+        connect "$ssid"
+      fi ;;
+    '*'*)
+      # Current connection: offer disconnect / forget
+      act="$(printf '%s\n' 'Disconnect' 'Forget' | fuzzel --dmenu --prompt "$cur > " 2>/dev/null)" || return 0
+      case "$act" in
+        Disconnect)
+          nmcli device disconnect "$cur_dev" >/dev/null 2>&1 && notify "Disconnected from $cur" ;;
+        Forget)
+          nmcli device disconnect "$cur_dev" >/dev/null 2>&1
+          nmcli connection delete "$cur" >/dev/null 2>&1 && notify "Forgot $cur" ;;
+      esac ;;
+    *)
+      connect "$(strip_row "$pick")" ;;
+  esac
+}
+
+toggle() {
+  local st
+  st="$(nmcli -t -f WIFI g 2>/dev/null || echo missing)"
+  case "$st" in
+    enabled)  nmcli radio wifi off && notify "Wi-Fi disabled" ;;
+    disabled) nmcli radio wifi on  && notify "Wi-Fi enabled" ;;
+    *)        notify "NetworkManager not running" ;;
+  esac
+}
+
+case "${1:-status}" in
+  status) status ;;
+  menu)   menu ;;
+  toggle) toggle ;;
+  *) printf 'usage: kox-wifi [status|menu|toggle]\n' >&2; exit 2 ;;
+esac

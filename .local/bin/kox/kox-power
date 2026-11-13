@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# kox-power: KOX OS Waybar battery widget.
+# Parses /sys/class/power_supply/BAT* (sysfs) — no external daemons.
+#
+# Status (Waybar custom module, return-type json, interval 5):
+#   text     minimalist battery icon by level / charging / AC
+#   class    charging | full | warning | critical | discharging | ac | none
+#   tooltip  percentage + status + estimated time remaining (when sysfs
+#            exposes power_now / current_now)
+set -u
+
+ICON_AC="󰚥"; ICON_FULL="󰁹"; ICON_CHG="󰂄"
+
+json() { jq -cnr --arg t "$1" --arg c "$2" --arg tt "$3" '{text:$t,class:$c,tooltip:$tt}'; }
+
+read_sys() { # $1 = supply dir, $2 = attribute (cat: suppresses missing-file noise)
+  cat "$1/$2" 2>/dev/null || true
+}
+
+battery_dir() {
+  local d
+  for d in /sys/class/power_supply/BAT*; do
+    [[ -d "$d" ]] && { printf '%s\n' "$d"; return; }
+  done
+}
+
+icon_for_cap() { # $1 = capacity 0-100
+  local c="$1"
+  if   (( c >= 90 )); then printf '%s' "$ICON_FULL"
+  elif (( c >= 80 )); then printf '%s' '󰂂'
+  elif (( c >= 70 )); then printf '%s' '󰂁'
+  elif (( c >= 60 )); then printf '%s' '󰂀'
+  elif (( c >= 50 )); then printf '%s' '󰁿'
+  elif (( c >= 40 )); then printf '%s' '󰁾'
+  elif (( c >= 30 )); then printf '%s' '󰁽'
+  elif (( c >= 20 )); then printf '%s' '󰁼'
+  elif (( c >= 10 )); then printf '%s' '󰁻'
+  else                     printf '%s' '󰁺'
+  fi
+}
+
+status() {
+  local d cap st icon class tt hours
+  d="$(battery_dir)"
+
+  if [[ -z "$d" ]]; then
+    if compgen -G '/sys/class/power_supply/A*' >/dev/null; then
+      json "$ICON_AC" "ac" "No battery — AC power"
+    else
+      json "" "none" ""
+    fi
+    return
+  fi
+
+  cap="$(read_sys "$d" capacity)"; cap="${cap//[^0-9]/}"; cap="${cap:-0}"
+  (( cap > 100 )) && cap=100 # some drivers over-report (e.g. 101)
+  st="$(read_sys "$d" status | head -1)"; st="${st:-Unknown}"
+
+  case "$st" in
+    *Charg*)
+      icon="$ICON_CHG"; class="charging"
+      tt="$cap% — Charging" ;;
+    Full|Not\ charging)
+      icon="$ICON_FULL"; class="full"
+      tt="$cap% — $st" ;;
+    Unknown)
+      # Driver gives no direction (common on AC power): level icon, dim class
+      icon="$(icon_for_cap "$cap")"; class="unknown"
+      tt="$cap% — Status unknown" ;;
+    *)
+      icon="$(icon_for_cap "$cap")"
+      class="discharging"
+      (( cap < 25 )) && class="warning"
+      (( cap < 15 )) && class="critical"
+      tt="$cap% — $st" ;;
+  esac
+
+  # Estimated time when the battery exposes a rate (µWh/µW or µAh/µA)
+  local now full rate
+  now="$(read_sys "$d" energy_now)"; full="$(read_sys "$d" energy_full)"; rate="$(read_sys "$d" power_now)"
+  if [[ -z "$now" || -z "$rate" || "$rate" == 0 ]]; then
+    now="$(read_sys "$d" charge_now)"; full="$(read_sys "$d" charge_full)"; rate="$(read_sys "$d" current_now)"
+  fi
+  if [[ -n "$now" && -n "$full" && -n "$rate" && "$rate" != 0 ]]; then
+    hours="$(awk -v n="$now" -v f="$full" -v r="$rate" -v s="$st" 'BEGIN {
+      h = (s ~ /Charg/) ? (f - n) / r : n / r
+      if (h < 0) h = 0
+      printf "%dh%02dm", int(h), int((h - int(h)) * 60)
+    }')"
+    if [[ "$class" == "charging" ]]; then
+      tt+=$'\n'"Full in $hours"
+    else
+      tt+=$'\n'"$hours remaining"
+    fi
+  fi
+
+  # Active power profile (guarded: the daemon may be down — degrade silently)
+  if command -v powerprofilesctl >/dev/null 2>&1; then
+    local prof
+    prof="$(timeout 2 powerprofilesctl get 2>/dev/null || true)"
+    [[ -n "$prof" ]] && tt+=$'\n'"Profile: ${prof//-/ }"
+  fi
+
+  json "$icon" "$class" "$tt"
+}
+
+case "${1:-status}" in
+  status) status ;;
+  *) printf 'usage: kox-power [status]\n' >&2; exit 2 ;;
+esac

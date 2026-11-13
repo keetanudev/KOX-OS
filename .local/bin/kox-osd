@@ -23,6 +23,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 
 import gi
 
@@ -70,6 +71,26 @@ def read_level():
         return (min(1.0, float(match.group(1))), "MUTED" in out)
     except Exception:
         return None
+
+
+def bt_audio_connected():
+    """True when a bluetooth card is up with an A2DP (audio) profile active.
+
+    Called on the watcher thread. BlueZ cards surface as bluez_card.* and
+    carry "Active Profile: a2dp-*" while an audio device is connected."""
+    try:
+        out = subprocess.run(["pactl", "list", "cards"], capture_output=True,
+                             text=True, timeout=4).stdout
+    except Exception:
+        return False
+    is_bt = False
+    for line in out.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Name: "):
+            is_bt = stripped[6:].startswith("bluez_card")
+        elif is_bt and stripped.startswith("Active Profile: "):
+            return stripped[len("Active Profile: "):].lower().startswith("a2dp")
+    return False
 
 
 def _rgba(spec):
@@ -168,8 +189,24 @@ class Osd(Gtk.Window):
         """One pactl subscribe stream on a helper thread. The volume value is
         read ON THE THREAD (plain subprocess, no GTK): the UI path carries
         only the parsed numbers, so the first frame lands ~15-25ms after the
-        change with no debounce in between."""
+        change with no debounce in between.
+
+        The OSD is a VOLUME indicator, not a media indicator: sink/server
+        events also fire on play and pause (the sink state flips
+        RUNNING/SUSPENDED with the level untouched), so each candidate event
+        is diffed against the last known level and only a real change is
+        shown. A bluetooth audio device connecting is the other moment worth
+        showing - even when the level happens to be identical."""
         def work():
+            # Baseline before subscribing: only real changes from here on
+            # may reveal the bar (a session start bursts sink events).
+            last = None
+            for _ in range(10):
+                last = read_level()
+                if last is not None:
+                    break
+                time.sleep(0.5)
+            bt_audio = bt_audio_connected()
             proc = subprocess.Popen(["pactl", "subscribe"],
                                     stdout=subprocess.PIPE,
                                     stderr=subprocess.DEVNULL, text=True)
@@ -178,8 +215,19 @@ class Osd(Gtk.Window):
                 # noise (sink-input/source) is ignored.
                 if "on sink #" in line or "on server" in line:
                     level = read_level()
-                    if level is not None:
+                    if level is not None and level != last:
+                        last = level
                         GLib.idle_add(self._apply, level[0], level[1])
+                elif "on card #" in line:
+                    now_bt = bt_audio_connected()
+                    if now_bt and not bt_audio:
+                        # BT audio just connected: handover moment - show
+                        # the level even when it did not change.
+                        level = read_level()
+                        if level is not None:
+                            last = level
+                            GLib.idle_add(self._apply, level[0], level[1])
+                    bt_audio = now_bt
 
         threading.Thread(target=work, daemon=True).start()
 

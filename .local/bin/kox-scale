@@ -35,7 +35,9 @@
 #   Generic GTK gsettings text-scaling-factor, quantized from the default
 #              font's pt size, read-first skip-if-equal.
 #
-# Usage: kox-scale <9-20|current|reset>
+# Usage: kox-scale <9-20|current|reset|apply>
+#   apply — re-apply the stored scale (session-start hook; a byte-level
+#           no-op when every consumer already matches)
 set -u
 
 STATE_DIR="$HOME/.config/kox"
@@ -55,6 +57,8 @@ MAX_SCALE=20
 REFERENCE_SCALE=11          # the KOX baseline = current pixel values
 WAYBAR_HEIGHT_REF=26
 KITTY_PT_REF=9              # font_size in kitty.conf
+KITTY_FLOOR=9               # app readability floor: kitty never drops below
+                            # the reference pt, on any smaller scale
 FUZZEL_REF=13               # :size= in fuzzel.ini
 MAKO_REF=11                 # trailing size in mako font=
 # panel class : reference px (from the panel's built-in CSS)
@@ -69,6 +73,13 @@ T0=$(date +%s%N)
 
 round_ref() {  # round(ref * scale / 11); 11 is odd so integer math is exact
     echo $(( ($1 * $2 + 5) / REFERENCE_SCALE ))
+}
+
+kitty_target() {  # scale target for kitty, clamped by the readability floor
+    local t
+    t=$(round_ref "$KITTY_PT_REF" "$1")
+    (( t < KITTY_FLOOR )) && t=$KITTY_FLOOR
+    printf '%s\n' "$t"
 }
 
 valid_scale() {
@@ -172,7 +183,7 @@ generate_panel_scale() {
 apply_kitty() {
     local scale=$1
     local target current
-    target="$(round_ref "$KITTY_PT_REF" "$scale").0"
+    target="$(kitty_target "$scale").0"
     current=$(grep -E '^font_size[[:space:]]' "$KITTY_CONFIG" 2>/dev/null |
         awk '{print $2}')
     [[ "$current" == "$target" ]] && return 1
@@ -255,8 +266,10 @@ apply_gtk() {
     factor_pt="${font%\'}"    # strip trailing quote
     factor_pt="${factor_pt##* }"
     [[ "$factor_pt" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
+    # app readability floor: effective size never drops below the
+    # reference pt (the factor floors at 1.0)
     whole=$(awk -v p="$factor_pt" -v s="$scale" -v r="$REFERENCE_SCALE" \
-        'BEGIN { printf "%d", int(p * s / r + 0.5) }')
+        'BEGIN { w = int(p * s / r + 0.5); printf "%d", (w < p ? p : w) }')
     factor=$(awk -v w="$whole" -v p="$factor_pt" \
         'BEGIN { printf "%.4f", w / p }')
     current=$(gsettings get org.gnome.desktop.interface text-scaling-factor \
@@ -284,6 +297,14 @@ restart_waybar() {
     if ! pgrep -x waybar >/dev/null 2>&1; then
         return 1
     fi
+    # The replacement bar must not inherit a stale session env: a signature
+    # from before a relogin blinds every Hyprland-IPC module (workspaces),
+    # and a missing DBUS address kills the pulse/bt legs. Re-derive both.
+    local runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    local sig
+    sig=$(ls "$runtime/hypr" 2>/dev/null | head -n 1)
+    [[ -n "$sig" ]] && export HYPRLAND_INSTANCE_SIGNATURE="$sig"
+    export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$runtime/bus}"
     pkill -x waybar 2>/dev/null || true
     sleep 0.25
     ( setsid waybar >/tmp/kox-waybar.log 2>&1 < /dev/null & )
@@ -299,7 +320,7 @@ print_current() {
     factor_pt="${font%\'}"; factor_pt="${factor_pt##* }"
     if [[ "$factor_pt" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
         factor=$(awk -v p="$factor_pt" -v s="$scale" -v r="$REFERENCE_SCALE" \
-            'BEGIN { printf "%.4f", int(p * s / r + 0.5) / p }')
+            'BEGIN { w = int(p * s / r + 0.5); if (w < p) w = p; printf "%.4f", w / p }')
     else
         factor="n/a"
     fi
@@ -311,7 +332,7 @@ print_current() {
         "$(round_ref 11 "$scale")" "$(round_ref 21 "$scale")" \
         "${#PANEL_REFS[@]}"
     printf '  Kitty:   %spt   Fuzzel: %spt   Mako: %spt\n' \
-        "$(round_ref "$KITTY_PT_REF" "$scale")" \
+        "$(kitty_target "$scale")" \
         "$(round_ref "$FUZZEL_REF" "$scale")" \
         "$(round_ref "$MAKO_REF" "$scale")"
     printf '  GTK text-scaling-factor: %s (font %s)\n' "$factor" "$font"
@@ -360,7 +381,7 @@ apply() {
         printf 'Panel: scale.css swapped (SIGHUP, warm daemon)\n'
     fi
     (( kitty_changed )) && printf 'Kitty: font_size %s (%s)\n' \
-        "$(round_ref "$KITTY_PT_REF" "$scale").0" \
+        "$(kitty_target "$scale").0" \
         "${KITTY_LIVE:-config only}"
     (( fuzzel_changed )) && printf 'Fuzzel: size %s (next launch)\n' \
         "$(round_ref "$FUZZEL_REF" "$scale")"
@@ -382,8 +403,13 @@ case "${1:-}" in
     reset)
         apply "$REFERENCE_SCALE"
         ;;
+    apply)
+        # re-apply the stored scale (session-start hook; byte-level no-op
+        # when every consumer already matches — cheap every boot)
+        apply "$(read_scale)"
+        ;;
     '')
-        printf 'Usage: kox-scale <%s-%s|current|reset>\n' "$MIN_SCALE" "$MAX_SCALE" >&2
+        printf 'Usage: kox-scale <%s-%s|current|reset|apply>\n' "$MIN_SCALE" "$MAX_SCALE" >&2
         exit 2
         ;;
     *)

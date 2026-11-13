@@ -1,10 +1,22 @@
-// KOX OS — ultra-thin island bar
-// custom/{wifi,bluetooth,battery} poll at 5 s per the owner's explicit
-// request (2026-11-11); everything else is native/event-driven.
+// KOX OS — ultra-thin bar
+// custom/{wifi,battery} poll at 5 s per the owner's explicit request
+// (2026-11-11); everything else is native/event-driven.
+//
+// Notch stability (2026-11-12): the island order is untouched, but an
+// invisible "ghost" cluster sits on its left and an invisible workspace
+// pill on its right. The ghosts mirror the real modules' widths, so any
+// growth is symmetric: the clock never moves, the Bluetooth name extends
+// right and the workspace pill grows left.
+//
+// Bluetooth lockstep: kox-bt-watcher (autostart) polls the BT state, writes
+// $XDG_RUNTIME_DIR/kox-bt-state.json once per change and signals waybar
+// ("signal": 8 → SIGRTMIN+8). Both BT widgets then re-render at the same
+// instant from that file, so no desync ever nudges the notch; the 5 s
+// interval stays as a startup/fallback poll.
 {
     "layer": "top",
     "position": "top",
-    "height": 26,
+    "height": 24,
     "spacing": 0,
     "margin-top": 0,
     "margin-bottom": 0,
@@ -12,10 +24,11 @@
     "margin-right": 0,
 
     "modules-left": [],
-    "modules-center": ["hyprland/workspaces", "clock", "custom/wifi", "custom/bluetooth", "pulseaudio", "custom/battery", "custom/power"],
+    "modules-center": ["custom/bluetooth#ghost", "custom/wifi#ghost", "pulseaudio#ghost", "custom/battery#ghost", "hyprland/workspaces", "clock", "custom/wifi", "custom/bluetooth", "pulseaudio", "custom/battery", "custom/power", "hyprland/workspaces#ghost"],
     "modules-right": [],
 
     "hyprland/workspaces": {},
+    "hyprland/workspaces#ghost": {},
 
     "clock": {
         "format": "{:%H:%M}"
@@ -31,12 +44,46 @@
     },
 
     "custom/bluetooth": {
-        "exec": "~/.local/bin/kox/kox-bluetooth",
+        "exec": "cat /run/user/1000/kox-bt-state.json",
         "return-type": "json",
         "interval": 5,
+        "signal": 8,
         "on-click": "~/.local/bin/kox-panel bluetooth",
         "on-click-right": "~/.local/bin/kox/kox-bluetooth toggle",
         "tooltip": true
+    },
+
+    // Invisible width mirrors of the icon cluster (see header note). The
+    // battery ghost carries the extra 10 px that balances the wifi module's
+    // left margin on the real side, so the notch lands dead center.
+    "custom/bluetooth#ghost": {
+        "exec": "cat /run/user/1000/kox-bt-state.json",
+        "return-type": "json",
+        "interval": 5,
+        "signal": 8,
+        "tooltip": false
+    },
+
+    "custom/wifi#ghost": {
+        "exec": "~/.local/bin/kox/kox-wifi",
+        "return-type": "json",
+        "interval": 5,
+        "tooltip": false
+    },
+
+    "pulseaudio#ghost": {
+        "format": "{icon}",
+        "format-muted": "󰝟",
+        "format-icons": {
+            "default": "󰕾"
+        }
+    },
+
+    "custom/battery#ghost": {
+        "exec": "~/.local/bin/kox/kox-power",
+        "return-type": "json",
+        "interval": 5,
+        "tooltip": false
     },
 
     "custom/battery": {

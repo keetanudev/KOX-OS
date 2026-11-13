@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# kox-bluetooth: KOX OS Waybar Bluetooth widget.
+#
+# Status (Waybar custom module, return-type json, interval 5): tri-state probe
+# (connected | on | off — the rice's lesson) with a fourth degraded state when
+# bluetoothd/adapter is unavailable.
+#   text     icon, plus the connected device name when there is one
+#   class    bt-connected | bt-on | bt-off | bt-down
+#   tooltip  device name / adapter state + click hints
+#
+# menu    -> blueman-manager (pair, connect, trust, forget)
+# toggle  -> adapter power on/off
+#
+# Every bluetoothctl probe is time-boxed with timeout(1) — bluetoothctl has
+# been seen to block forever on a flaky link, which would freeze the widget
+# (rice lesson).
+set -u
+
+ICON_CONN="󰂚"; ICON_ON="󰂯"; ICON_OFF="󰂲"
+
+notify() { notify-send "Bluetooth" "$1" 2>/dev/null || true; }
+
+json() { jq -cnr --arg t "$1" --arg c "$2" --arg tt "$3" '{text:$t,class:$c,tooltip:$tt}'; }
+
+bt() { timeout 5 bluetoothctl "$@" 2>/dev/null; }
+
+connected_device() { # name of the first connected device, empty if none
+  bt devices Connected | head -1 | cut -d' ' -f3-
+}
+
+status() {
+  local info name
+  info="$(bt show)"
+  if [[ -z "$info" ]]; then
+    json "$ICON_OFF" "bt-down" "Bluetooth unavailable (is bluetoothd running?)"$'\n'"left-click: blueman-manager"
+    return
+  fi
+  if ! grep -q "Powered: yes" <<<"$info"; then
+    json "$ICON_OFF" "bt-off" "Bluetooth off — right-click to enable"$'\n'"left-click: blueman-manager"
+    return
+  fi
+  name="$(connected_device)"
+  if [[ -n "$name" ]]; then
+    json "$ICON_CONN ${name:0:14}" "bt-connected" "Connected: $name"$'\n'"left-click: blueman-manager  right-click: power off"
+  else
+    json "$ICON_ON" "bt-on" "Bluetooth on, no devices connected"$'\n'"left-click: blueman-manager  right-click: power off"
+  fi
+}
+
+menu() { setsid blueman-manager >/dev/null 2>&1 </dev/null & }
+
+toggle() {
+  local cur
+  cur="$(bt show | grep -o "Powered: yes" || true)"
+  if [[ "$cur" == "Powered: yes" ]]; then
+    bt power off >/dev/null && notify "Bluetooth off"
+  else
+    bt power on  >/dev/null && notify "Bluetooth on"
+  fi
+}
+
+case "${1:-status}" in
+  status) status ;;
+  menu)   menu ;;
+  toggle) toggle ;;
+  *) printf 'usage: kox-bluetooth [status|menu|toggle]\n' >&2; exit 2 ;;
+esac
