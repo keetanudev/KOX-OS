@@ -1,43 +1,103 @@
 #!/usr/bin/env bash
 # kox-waybar-autostart: one-shot session guard for the status bar.
 #
-# waybar is exec'd at the same instant as every other autostart item; on a
-# cold boot it has been seen to lose the race and die before the session
-# settles (every other autostart item survived, the bar alone vanished).
-# This guard waits for the Wayland socket, supervises only the first
-# seconds of the bar's life with bounded retries, then exits — no resident
-# process, same pattern as kox-panel-autostart / kox-pulse-autostart.
+# Boot forensics (2026-11-14): the bar's first cold-boot instance dies
+# silently within ~100 ms of being exec'd in the autostart burst (zero
+# output, no kernel trace) while every other autostart item survives.
+# The old guard only detected that death after its `sleep 2` verify-sleep
+# plus a `sleep 1` backoff, so every lost race cost exactly +3 s of
+# barless boot (measured: Hyprland :45, batch :47, bar fork :50, config
+# loaded :51.1).
 #
-# KOX_WAYBAR_BIN overrides the bar binary (used by tests).
+# This rewrite is spawn-first: the bar is forked the moment the Wayland
+# socket exists, liveness is polled at 100 ms granularity, and a death
+# triggers an immediate respawn (up to 3 attempts). A lost race now costs
+# ~0.3 s instead of 3 s. Every milestone is logged with a timestamp into
+# /tmp/kox-waybar.log — the bar's own output lands in the same file — so
+# the boot timeline stays answerable afterwards.
+#
+# One-shot: the guard always terminates (exit 0 bar up / exit 1 bar
+# down). No resident process — same pattern as kox-panel-autostart.
+#
+# Test hooks: KOX_WAYBAR_BIN (bar binary), KOX_WAYBAR_ARGS (spawn args),
+# KOX_WAYBAR_ATTEMPTS (default 3), KOX_WAYBAR_DEADLINE (survival window,
+# default 2 s).
 set -u
 
 runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 WAYBAR_BIN="${KOX_WAYBAR_BIN:-waybar}"
+WAYBAR_ARGS="${KOX_WAYBAR_ARGS:-}"
+ATTEMPTS="${KOX_WAYBAR_ATTEMPTS:-3}"
+DEADLINE="${KOX_WAYBAR_DEADLINE:-2}"   # seconds the bar must survive to count as up
 LOG=/tmp/kox-waybar.log
 
-# Bar already up (fast start beat this guard)? One bar only, exit quietly.
-pgrep -x waybar >/dev/null 2>&1 && exit 0
+log() { printf '[%s] guard: %s\n' "$(date '+%F %T.%3N')" "$*" >>"$LOG"; }
+elapsed() {  # seconds since $1 (EPOCHREALTIME), 2 decimals
+    awk -v a="$1" -v b="${EPOCHREALTIME:-$1}" 'BEGIN { printf "%.2f", b - a }'
+}
+
+t0=${EPOCHREALTIME:-}
+log "start (pid $$, bin=$WAYBAR_BIN)"
+
+# Bar already up (fast session start beat this guard)? One bar only.
+if pgrep -x waybar >/dev/null 2>&1; then
+    log "waybar already running - guard exits 0 ($(elapsed "$t0")s)"
+    exit 0
+fi
 
 # The bar must not inherit a stale session env (same contract as the
-# kox-scale restart_waybar leg): re-derive the live Hyprland signature and
-# fall back the DBUS address for whatever env the caller had.
+# kox-scale restart_waybar leg): re-derive the live Hyprland signature
+# and fall back the DBUS address for whatever env the caller had.
 sig=$(ls "$runtime/hypr" 2>/dev/null | head -n 1)
 [[ -n "$sig" ]] && export HYPRLAND_INSTANCE_SIGNATURE="$sig"
 export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$runtime/bus}"
+[[ -n "$sig" ]] && sig_state="live" || sig_state="inherited"
+log "env re-derived (sig=$sig_state, dbus ok)"
 
-# Wait for the Wayland socket (cold boot: the compositor may still be
-# laying out outputs). Max ~5 s, then try anyway.
-for _ in 1 2 3 4 5 6 7 8 9 10; do
+# Wait for the Wayland socket — fast poll (100 ms steps, max ~5 s), then
+# spawn anyway; a socket-less spawn dies instantly and is retried below.
+for _ in $(seq 1 50); do
     ls "$runtime" 2>/dev/null | grep -q '^wayland-' && break
-    sleep 0.5
+    sleep 0.1
 done
+if ls "$runtime" 2>/dev/null | grep -q '^wayland-'; then
+    log "wayland socket present after $(elapsed "$t0")s"
+else
+    log "wayland socket not seen after 5s - spawning anyway"
+fi
 
-# Supervised start: up to 3 attempts; the bar must survive its first 2 s
-# to count as up. Bounded — the guard always terminates.
-for attempt in 1 2 3; do
-    ( setsid "$WAYBAR_BIN" >>"$LOG" 2>&1 < /dev/null & )
-    sleep 2
-    pgrep -x waybar >/dev/null 2>&1 && exit 0
-    sleep 1
+# Supervised spawn: fork the bar, then watch it at 100 ms granularity.
+#   - dead before registering (the cold-boot race): respawn after ~0.3 s
+#   - dies mid-watch (session still settling): respawn at the next tick
+#   - alive for the whole $DEADLINE: success, guard exits 0
+spawn_and_watch() {
+    local attempt=$1
+    ( setsid "$WAYBAR_BIN" $WAYBAR_ARGS >>"$LOG" 2>&1 </dev/null & )
+    log "attempt $attempt: spawned"
+    local tick seen_up=0 misses=0
+    for tick in $(seq 1 $((DEADLINE * 10))); do
+        sleep 0.1
+        if pgrep -x waybar >/dev/null 2>&1; then
+            seen_up=1
+            misses=0
+        elif (( seen_up )); then
+            log "attempt $attempt: died after ~$((tick * 100))ms - respawning"
+            return 1
+        elif (( ++misses >= 3 )); then
+            log "attempt $attempt: never registered in ~300ms - respawning"
+            return 1
+        fi
+    done
+    if (( seen_up )); then
+        log "attempt $attempt: survived ${DEADLINE}s - bar is up ($(elapsed "$t0")s total)"
+        return 0
+    fi
+    log "attempt $attempt: never registered within ${DEADLINE}s - respawning"
+    return 1
+}
+
+for attempt in $(seq 1 "$ATTEMPTS"); do
+    spawn_and_watch "$attempt" && exit 0
 done
+log "all $ATTEMPTS attempts failed - guard exits 1 (bar down)"
 exit 1

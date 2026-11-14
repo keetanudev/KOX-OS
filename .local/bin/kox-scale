@@ -71,6 +71,16 @@ PANEL_REFS=(
 
 T0=$(date +%s%N)
 
+# Boot forensics: every apply logs start + verdict to a per-session file
+# so "did the scale engine run at boot, and what did it change" is always
+# answerable afterwards. $XDG_RUNTIME_DIR is tmpfs — the log is per-boot
+# by construction, same lifetime as /tmp/kox-waybar.log.
+BOOT_LOG="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/kox-scale-boot.log"
+APPLY_TAG="manual"
+boot_log() {
+    printf '[%s] kox-scale: %s\n' "$(date '+%F %T.%3N')" "$*" >>"$BOOT_LOG" 2>/dev/null || true
+}
+
 round_ref() {  # round(ref * scale / 11); 11 is odd so integer math is exact
     echo $(( ($1 * $2 + 5) / REFERENCE_SCALE ))
 }
@@ -344,7 +354,10 @@ apply() {
     local scale=$1
     local style_changed=0 css_changed=0 height_changed=0 panel_changed=0
     local kitty_changed=0 fuzzel_changed=0 mako_changed=0 gtk_changed=0
+    local waybar_restart=""
     KITTY_LIVE=""
+
+    boot_log "apply start: scale=$scale tag=$APPLY_TAG"
 
     mkdir -p "$STATE_DIR"
 
@@ -364,6 +377,7 @@ apply() {
 
     if (( height_changed )); then
         if restart_waybar; then
+            waybar_restart=", waybar restarted"
             printf 'Waybar: restarted (bar height %s)\n' \
                 "$(round_ref "$WAYBAR_HEIGHT_REF" "$scale")"
         else
@@ -393,7 +407,25 @@ apply() {
           kitty_changed + fuzzel_changed + mako_changed + gtk_changed == 0 )); then
         printf 'UI scale %s: already applied - no files touched, no signals\n' "$scale"
     fi
-    printf 'Apply time: %d ms\n' $(( ($(date +%s%N) - T0) / 1000000 ))
+    local total legs
+    total=$(( ($(date +%s%N) - T0) / 1000000 ))
+    printf 'Apply time: %d ms\n' "$total"
+    # Boot verdict (BOOT_LOG above): the durable, per-boot answer to
+    # "did the engine run, and what did it apply".
+    legs=""
+    (( style_changed  )) && legs="$legs waybar-style"
+    (( css_changed    )) && legs="$legs waybar-css"
+    (( height_changed )) && legs="$legs waybar-height"
+    (( panel_changed  )) && legs="$legs panel"
+    (( kitty_changed  )) && legs="$legs kitty"
+    (( fuzzel_changed )) && legs="$legs fuzzel"
+    (( mako_changed   )) && legs="$legs mako"
+    (( gtk_changed    )) && legs="$legs gtk"
+    if [[ -z "$legs" ]]; then
+        boot_log "verdict (tag=$APPLY_TAG): scale $scale already applied - byte-level no-op (${total}ms)"
+    else
+        boot_log "verdict (tag=$APPLY_TAG): scale $scale changed:$legs${waybar_restart} (${total}ms)"
+    fi
 }
 
 case "${1:-}" in
@@ -406,6 +438,7 @@ case "${1:-}" in
     apply)
         # re-apply the stored scale (session-start hook; byte-level no-op
         # when every consumer already matches — cheap every boot)
+        [[ "${KOX_SCALE_BOOT:-}" == 1 ]] && APPLY_TAG=boot
         apply "$(read_scale)"
         ;;
     '')

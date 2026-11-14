@@ -4,6 +4,13 @@
 -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
 
 hl.on("hyprland.start", function()
+    -- Status bar FIRST: a barless boot is the most visible defect a
+    -- session can have, and the bar needs nothing but the Wayland socket.
+    -- The guard is spawn-first with instant bounded respawn (its own
+    -- milestone log lands in /tmp/kox-waybar.log) and re-derives its
+    -- env; kox-scale apply below handles a bar that is already running.
+    hl.exec_cmd("kox-waybar-autostart")
+
     -- Export session env into dbus activation env (OpenRC: no systemd import)
     hl.exec_cmd("dbus-update-activation-environment --all")
 
@@ -11,13 +18,9 @@ hl.on("hyprland.start", function()
     -- configs persist on disk, so on a normal boot this is a byte-level
     -- no-op (~100 ms); it exists so drift (engine curve changes, manual
     -- edits) self-heals at every boot instead of showing as a stale UI.
-    hl.exec_cmd("kox-scale apply")
-
-    -- Status bar: guarded start (one-shot supervisor — waybar has been
-    -- seen to lose the cold-boot race and die silently while every other
-    -- autostart item survived; the guard waits for the Wayland socket,
-    -- retries bounded, then exits. No daemon.)
-    hl.exec_cmd("kox-waybar-autostart")
+    -- KOX_SCALE_BOOT=1 tags the run so its verdict is written to the
+    -- per-boot log ($XDG_RUNTIME_DIR/kox-scale-boot.log).
+    hl.exec_cmd("KOX_SCALE_BOOT=1 kox-scale apply")
 
     -- Bluetooth widget daemon: polls BT state, writes one JSON state file
     -- and signals waybar so both BT widgets re-render in lockstep (keeps
