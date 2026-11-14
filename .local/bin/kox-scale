@@ -57,8 +57,6 @@ MAX_SCALE=20
 REFERENCE_SCALE=11          # the KOX baseline = current pixel values
 WAYBAR_HEIGHT_REF=26
 KITTY_PT_REF=9              # font_size in kitty.conf
-KITTY_FLOOR=9               # app readability floor: kitty never drops below
-                            # the reference pt, on any smaller scale
 FUZZEL_REF=13               # :size= in fuzzel.ini
 MAKO_REF=11                 # trailing size in mako font=
 # panel class : reference px (from the panel's built-in CSS)
@@ -85,11 +83,8 @@ round_ref() {  # round(ref * scale / 11); 11 is odd so integer math is exact
     echo $(( ($1 * $2 + 5) / REFERENCE_SCALE ))
 }
 
-kitty_target() {  # scale target for kitty, clamped by the readability floor
-    local t
-    t=$(round_ref "$KITTY_PT_REF" "$1")
-    (( t < KITTY_FLOOR )) && t=$KITTY_FLOOR
-    printf '%s\n' "$t"
+kitty_target() {  # scale target for kitty: plain reference curve
+    round_ref "$KITTY_PT_REF" "$1"
 }
 
 valid_scale() {
@@ -276,10 +271,8 @@ apply_gtk() {
     factor_pt="${font%\'}"    # strip trailing quote
     factor_pt="${factor_pt##* }"
     [[ "$factor_pt" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
-    # app readability floor: effective size never drops below the
-    # reference pt (the factor floors at 1.0)
     whole=$(awk -v p="$factor_pt" -v s="$scale" -v r="$REFERENCE_SCALE" \
-        'BEGIN { w = int(p * s / r + 0.5); printf "%d", (w < p ? p : w) }')
+        'BEGIN { printf "%d", int(p * s / r + 0.5) }')
     factor=$(awk -v w="$whole" -v p="$factor_pt" \
         'BEGIN { printf "%.4f", w / p }')
     current=$(gsettings get org.gnome.desktop.interface text-scaling-factor \
@@ -330,7 +323,7 @@ print_current() {
     factor_pt="${font%\'}"; factor_pt="${factor_pt##* }"
     if [[ "$factor_pt" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
         factor=$(awk -v p="$factor_pt" -v s="$scale" -v r="$REFERENCE_SCALE" \
-            'BEGIN { w = int(p * s / r + 0.5); if (w < p) w = p; printf "%.4f", w / p }')
+            'BEGIN { printf "%.4f", int(p * s / r + 0.5) / p }')
     else
         factor="n/a"
     fi
