@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """kox-osd - KOX OS volume indicator.
 
-Minimal: a thin white bar, no background, no icon. Event-driven with zero
+Minimal: a thin dot-matrix meter, no background, no icon. Event-driven with zero
 polling - one `pactl subscribe` stream (a helper thread) notices every
 default-sink volume/mute change from anything (volume knob, cachy-vol keys,
 the panel's slider, mute), reads the level ON THAT THREAD so no subprocess
@@ -34,8 +34,9 @@ from gi.repository import Gdk, GLib, Gtk, GtkLayerShell  # noqa: E402
 
 APP = "kox-osd"
 WIDTH = 280
-PAD = 4            # breathing room above/below the thin bar
-BAR_H = 4          # the "more thinner" indicator
+PAD = 4            # breathing room above/below the meter
+DOT = 8            # dot diameter of the Nothing-style meter
+DOTS = 28          # dots across the meter width
 TRACK = "rgba(255, 255, 255, 0.16)"
 FILL = "#ffffff"
 FILL_MUTED = "rgba(255, 255, 255, 0.35)"
@@ -114,8 +115,8 @@ class Osd(Gtk.Window):
         super().__init__(title=APP)
         self.set_decorated(False)
         self.set_resizable(False)
-        self.set_size_request(WIDTH, BAR_H + PAD * 2)
-        self.set_default_size(WIDTH, BAR_H + PAD * 2)
+        self.set_size_request(WIDTH, DOT + PAD * 2)
+        self.set_default_size(WIDTH, DOT + PAD * 2)
         self.set_app_paintable(True)
         screen = self.get_screen()
         visual = screen.get_rgba_visual()
@@ -159,7 +160,7 @@ class Osd(Gtk.Window):
                              lambda: (Gtk.main_quit(), False)[1])
 
     def place(self):
-        """Top-centre, exactly PAD+BAR_H/2-scaled gap below the bar."""
+        """Top-centre, a fixed gap below the bar."""
         GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.TOP, True)
         GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.LEFT, True)
         GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.RIGHT, False)
@@ -183,7 +184,7 @@ class Osd(Gtk.Window):
             pass
         left = max(2, (screen_w - WIDTH) // 2) if screen_w else 0
         GtkLayerShell.set_margin(self, GtkLayerShell.Edge.LEFT, left)
-        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.TOP, bar + 10)
+        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.TOP, bar + 38)
 
     def _start_watcher(self):
         """One pactl subscribe stream on a helper thread. The volume value is
@@ -300,19 +301,25 @@ class Osd(Gtk.Window):
         return GLib.SOURCE_CONTINUE
 
     def _draw(self, _w, cr):
+        """Nothing dot-matrix meter: a fixed row of round dots — track dots
+        dim, filled dots solid (dimmed entirely when muted). The filled
+        count chases the eased volume fraction, so key-repeat bursts still
+        sweep fluidly, dot by dot."""
         alloc = self.bar.get_allocation()
         w = alloc.width
         h = alloc.height
-        radius = BAR_H / 2.0
-        y = (h - BAR_H) / 2.0
-        cr.set_source_rgba(*_rgba(TRACK))
-        _rounded(cr, 0, y, w, BAR_H, radius)
-        cr.fill()
+        pitch = w / DOTS
+        radius = min(DOT, pitch * 0.62) / 2.0
+        filled = int(round(self.disp * DOTS))
+        if self.disp > 0.001 and filled == 0:
+            filled = 1  # keep the near-zero sliver honest
         spec = FILL_MUTED if self.muted else FILL
-        if self.disp > 0.001 or self.muted:
-            cr.set_source_rgba(*_rgba(spec))
-            fill_w = max(radius * 2, w * self.disp)
-            _rounded(cr, 0, y, fill_w, BAR_H, radius)
+        for i in range(DOTS):
+            cr.arc(i * pitch + pitch / 2.0, h / 2.0, radius, 0.0, 6.2832)
+            if i < filled:
+                cr.set_source_rgba(*_rgba(spec))
+            else:
+                cr.set_source_rgba(*_rgba(TRACK))
             cr.fill()
         return False
 

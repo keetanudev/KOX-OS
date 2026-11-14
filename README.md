@@ -10,7 +10,7 @@ KOX OS is a lightweight, independently developed Linux desktop platform built on
 - **kox-scale engine** — one integer (9–20) scales every text surface: Waybar, the GTK panels, kitty, fuzzel, mako and generic GTK apps, each through its own warm-reload path (CSS hot-swap, live kitty socket, gsettings) with zero compositor interaction. App text carries readability floors, and `kox-scale apply` re-applies the stored scale at every boot as a byte-level no-op.
 - **Boot reliability** — every session component starts through a guarded one-shot: the bar waits for the Wayland socket and retries bounded (`kox-waybar-autostart`), the scale self-heals, and the Bluetooth watcher publishes a lockstep state file that both bar widgets read, so the clock notch never moves.
 - **Power profiles under OpenRC** — `power-profiles-daemon` via the official OpenRC init script (dbus activation is intentionally inert on Artix), switchable from the battery panel's profile pills.
-- **Event-driven volume OSD** — a minimal thin overlay that appears only when volume or mute *actually* changes (immune to play/pause sink noise) and on Bluetooth audio handover.
+- **Event-driven volume OSD** — a minimal Nothing-style dot-matrix overlay that appears only when volume or mute *actually* changes (immune to play/pause sink noise) and on Bluetooth audio handover.
 
 ## Layout
 
