@@ -35,11 +35,11 @@
     },
 
     "custom/wifi": {
-        "exec": "~/.local/bin/kox/kox-wifi",
+        "exec": "~/.local/bin/kox-widgets/kox-wifi",
         "return-type": "json",
         "interval": 5,
         "on-click": "~/.local/bin/kox-panel wifi",
-        "on-click-right": "~/.local/bin/kox/kox-wifi toggle",
+        "on-click-right": "~/.local/bin/kox-widgets/kox-wifi toggle",
         "tooltip": true
     },
 
@@ -49,7 +49,7 @@
         "interval": 5,
         "signal": 8,
         "on-click": "~/.local/bin/kox-panel bluetooth",
-        "on-click-right": "~/.local/bin/kox/kox-bluetooth toggle",
+        "on-click-right": "~/.local/bin/kox-widgets/kox-bluetooth toggle",
         "tooltip": true
     },
 
@@ -65,7 +65,7 @@
     },
 
     "custom/wifi#ghost": {
-        "exec": "~/.local/bin/kox/kox-wifi",
+        "exec": "~/.local/bin/kox-widgets/kox-wifi",
         "return-type": "json",
         "interval": 5,
         "tooltip": false
@@ -80,14 +80,14 @@
     },
 
     "custom/battery#ghost": {
-        "exec": "~/.local/bin/kox/kox-power",
+        "exec": "~/.local/bin/kox-widgets/kox-power",
         "return-type": "json",
         "interval": 5,
         "tooltip": false
     },
 
     "custom/battery": {
-        "exec": "~/.local/bin/kox/kox-power",
+        "exec": "~/.local/bin/kox-widgets/kox-power",
         "return-type": "json",
         "interval": 5,
         "on-click": "~/.local/bin/kox-panel battery",

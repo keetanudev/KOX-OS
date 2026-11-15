@@ -1,0 +1,362 @@
+#!/usr/bin/env bash
+# kox: KOX OS command center.
+#
+# One entry point for the platform's user-facing operations. Every subcommand
+# is a thin wrapper or a read-only check: no daemons, no state of its own, no
+# config edits. scale/lock exec the owner script so exit codes and signals
+# pass through untouched.
+#
+# Usage: kox <update|scale|lock|doctor|theme|wallpaper|bar|cursor|help> [args]
+set -u
+
+VERSION="0.1.0"
+KOX_REPO="${KOX_REPO:-$HOME/KOX-OS}"
+
+# --- presentation ----------------------------------------------------------
+# Color on a TTY only. KOX_COLOR=always forces it (screenshots, logs);
+# KOX_COLOR=never or NO_COLOR disables it.
+use_color=0
+if [[ ${KOX_COLOR:-} == always ]]; then
+    use_color=1
+elif [[ ${KOX_COLOR:-} == never || -n ${NO_COLOR:-} || ! -t 1 ]]; then
+    use_color=0
+else
+    use_color=1
+fi
+
+if (( use_color )); then
+    BOLD=$'\033[1m'
+    DIM=$'\033[2m'
+    RESET=$'\033[0m'
+    RED=$'\033[91m'
+    GREEN=$'\033[92m'
+    CYAN=$'\033[96m'
+    WHITE=$'\033[97m'
+else
+    BOLD='' DIM='' RESET='' RED='' GREEN='' CYAN='' WHITE=''
+fi
+
+hr() {
+    printf '  %s──────────────────────────────────────────────────────────%s\n' "$DIM" "$RESET"
+}
+
+brand() { # brand <subtitle>
+    printf '\n  %s%sKOX OS%s  %s%s%s\n' \
+        "$BOLD" "$WHITE" "$RESET" "$DIM" "$1" "$RESET"
+    hr
+}
+
+# --- doctor ----------------------------------------------------------------
+DOCTOR_PASS=0
+DOCTOR_FAIL=0
+
+doctor_row() { # doctor_row <ok|fail> <label> <detail>
+    local state=$1 label=$2 detail=$3 tag color
+    if [[ $state == ok ]]; then
+        tag='[OK]'
+        color=$GREEN
+    else
+        tag='[FAIL]'
+        color=$RED
+    fi
+    printf '  %s%-6s%s  %s%-20s%s  %s%s%s\n' \
+        "$color" "$tag" "$RESET" "$BOLD" "$label" "$RESET" "$DIM" "$detail" "$RESET"
+}
+
+doctor_ok() {
+    DOCTOR_PASS=$((DOCTOR_PASS + 1))
+    doctor_row ok "$@"
+}
+
+doctor_fail() {
+    DOCTOR_FAIL=$((DOCTOR_FAIL + 1))
+    doctor_row fail "$@"
+}
+
+check_pipewire() {
+    if ! command -v rc-service >/dev/null 2>&1; then
+        doctor_fail "PipeWire" "rc-service not found"
+    elif rc-service --user pipewire status >/dev/null 2>&1; then
+        doctor_ok "PipeWire" "user service is running"
+    else
+        doctor_fail "PipeWire" "user service is not running"
+    fi
+}
+
+check_bluetooth() {
+    local svc out stopped='' exists=0
+
+    if ! command -v rc-service >/dev/null 2>&1; then
+        doctor_fail "Bluetooth" "rc-service not found"
+        return
+    fi
+
+    # Artix ships the init script as bluetoothd; bluetooth is kept as a
+    # fallback for other OpenRC layouts.
+    for svc in bluetoothd bluetooth; do
+        if out=$(rc-service "$svc" status 2>&1); then
+            doctor_ok "Bluetooth" "$svc service is running"
+            return
+        fi
+        if [[ $out == *"does not exist"* ]]; then
+            continue
+        fi
+        exists=1
+        stopped=$svc
+    done
+
+    if (( exists )); then
+        doctor_fail "Bluetooth" "$stopped service is stopped"
+    else
+        doctor_fail "Bluetooth" "no bluetooth service found"
+    fi
+}
+
+check_waybar() {
+    local pid
+
+    # The autostart guard is deliberately one-shot: it exits once the bar has
+    # survived its start window. Prefer a live guard; otherwise verify the
+    # outcome it exists to produce, so a healthy bar never reports FAIL.
+    pid=$(pgrep -f '[k]ox-waybar-autostart' 2>/dev/null | head -n 1) || true
+    if [[ -n $pid ]]; then
+        doctor_ok "Waybar" "autostart guard active (pid $pid)"
+        return
+    fi
+
+    pid=$(pgrep -x waybar 2>/dev/null | head -n 1) || true
+    if [[ -n $pid ]]; then
+        doctor_ok "Waybar" "bar running (pid $pid; guard is one-shot)"
+        return
+    fi
+
+    doctor_fail "Waybar" "bar down; autostart guard not running"
+}
+
+check_privileges() {
+    if command -v doas >/dev/null 2>&1 && doas -n true >/dev/null 2>&1; then
+        doctor_ok "Privileges" "doas ready (non-interactive)"
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+        doctor_ok "Privileges" "sudo ready (non-interactive)"
+    elif command -v sudo >/dev/null 2>&1 && sudo -n -l >/dev/null 2>&1; then
+        doctor_ok "Privileges" "sudo permitted (password required)"
+    elif { command -v sudo >/dev/null 2>&1 || command -v doas >/dev/null 2>&1; } &&
+         id -nG 2>/dev/null | tr ' ' '\n' | grep -qxE 'wheel|sudo'; then
+        doctor_ok "Privileges" "wheel group (password may be required)"
+    elif command -v doas >/dev/null 2>&1; then
+        doctor_fail "Privileges" "doas present; access not granted"
+    elif command -v sudo >/dev/null 2>&1; then
+        doctor_fail "Privileges" "sudo present; access not granted"
+    else
+        doctor_fail "Privileges" "neither sudo nor doas installed"
+    fi
+}
+
+cmd_doctor() {
+    DOCTOR_PASS=0
+    DOCTOR_FAIL=0
+
+    brand doctor
+    check_pipewire
+    check_bluetooth
+    check_waybar
+    check_privileges
+
+    printf '\n'
+    if (( DOCTOR_FAIL == 0 )); then
+        printf '  %s%d checks · all passed%s\n' \
+            "$GREEN" "$((DOCTOR_PASS + DOCTOR_FAIL))" "$RESET"
+        return 0
+    fi
+    printf '  %s%d checks · %d passed · %d failed%s\n' \
+        "$RED" "$((DOCTOR_PASS + DOCTOR_FAIL))" "$DOCTOR_PASS" "$DOCTOR_FAIL" "$RESET"
+    return 1
+}
+
+# --- help ------------------------------------------------------------------
+help_row() { # help_row <command> <description>
+    printf '    %s%-18s%s  %s%s%s\n' \
+        "$GREEN" "$1" "$RESET" "$DIM" "$2" "$RESET"
+}
+
+cmd_help() {
+    brand "command center · v$VERSION"
+
+    printf '\n  %sUSAGE%s\n' "$CYAN" "$RESET"
+    printf '    %skox%s <command> [args]\n' "$BOLD" "$RESET"
+
+    printf '\n  %sSYSTEM%s\n' "$CYAN" "$RESET"
+    help_row update "sync packages + pull the dotfiles repo"
+    help_row "scale <number>" "set UI type scale (9-20, current, reset, apply)"
+
+    printf '\n  %sAPPEARANCE%s\n' "$CYAN" "$RESET"
+    help_row theme "open the visual theme picker (11 rice themes)"
+    help_row "theme <name>" "set accent directly (pink, blue, or rice theme)"
+    help_row wallpaper "open the visual wallpaper picker (Hyprpaper)"
+    help_row "wallpaper --restore" "re-apply the saved wallpaper"
+    help_row bar "open the bar-style picker (stub)"
+    help_row cursor "open the cursor theme picker (fuzzel)"
+
+    printf '\n  %sSESSION%s\n' "$CYAN" "$RESET"
+    help_row lock "lock the session (quickshell + PAM)"
+
+    printf '\n  %sDIAGNOSTICS%s\n' "$CYAN" "$RESET"
+    help_row doctor "check PipeWire, Bluetooth, Waybar, privileges"
+    help_row help "show this menu"
+
+    printf '\n  %sEXAMPLES%s\n' "$CYAN" "$RESET"
+    printf '    %s$%s %skox scale 12%s      %s# larger type, no compositor reload%s\n' \
+        "$DIM" "$RESET" "$BOLD" "$RESET" "$DIM" "$RESET"
+    printf '    %s$%s %skox theme blue%s    %s# switch accent, instant bar reload%s\n' \
+        "$DIM" "$RESET" "$BOLD" "$RESET" "$DIM" "$RESET"
+    printf '    %s$%s %skox theme%s        %s# open the visual theme picker%s\n' \
+        "$DIM" "$RESET" "$BOLD" "$RESET" "$DIM" "$RESET"
+    printf '    %s$%s %skox doctor%s        %s# one line per check, [OK] / [FAIL]%s\n' \
+        "$DIM" "$RESET" "$BOLD" "$RESET" "$DIM" "$RESET"
+}
+
+# --- commands --------------------------------------------------------------
+kox_exec() { # kox_exec <script> [args...]
+    local name=$1 path
+    shift
+
+    path=$(type -P "$name" 2>/dev/null) || path="$HOME/.local/bin/$name"
+    if [[ ! -f $path || ! -x $path ]]; then
+        printf '  %skox:%s %s not found or not executable\n' \
+            "$RED" "$RESET" "$name" >&2
+        return 127
+    fi
+    exec "$path" "$@"
+}
+
+cmd_scale() {
+    kox_exec kox-scale "$@"
+}
+
+cmd_lock() {
+    kox_exec kox-lock "$@"
+}
+
+cmd_picker() { # cmd_picker <tool> [args...] — exec a kox-pickers tool
+    local path="$HOME/.local/bin/kox-pickers/$1"
+    shift
+    if [[ ! -f $path || ! -x $path ]]; then
+        printf '  %skox:%s picker not found: %s\n' \
+            "$RED" "$RESET" "$path" >&2
+        return 127
+    fi
+    exec "$path" "$@"
+}
+
+cmd_wallpaper() {
+    cmd_picker kox-wallpaper "$@"
+}
+
+cmd_bar() {
+    cmd_picker kox-bar "$@"
+}
+
+cmd_cursor() {
+    cmd_picker kox-cursor "$@"
+}
+
+cmd_update() {
+    local repo=$KOX_REPO
+
+    printf '\n  %sUpdating System Packages...%s\n' "$BOLD$CYAN" "$RESET"
+    if ! sudo pacman -Syu --noconfirm; then
+        printf '\n  %skox:%s system update failed; dotfiles not updated.\n' \
+            "$RED" "$RESET" >&2
+        return 1
+    fi
+
+    printf '\n  %sUpdating KOX OS Dotfiles...%s\n' "$BOLD$CYAN" "$RESET"
+    if ! cd "$repo"; then
+        printf '\n  %skox:%s dotfiles repo not found: %s\n' \
+            "$RED" "$RESET" "$repo" >&2
+        return 1
+    fi
+    if ! git pull; then
+        printf '\n  %skox:%s dotfiles update failed.\n' \
+            "$RED" "$RESET" >&2
+        return 1
+    fi
+
+    printf '\n  %s✓ KOX OS is up to date.%s\n\n' "$GREEN" "$RESET"
+
+    # A successful pull can replace this very script. Exit from the parsed
+    # function body before Bash reads any further bytes from the new file.
+    exit 0
+}
+
+cmd_theme() {
+    local name=${1:-}
+    local src dest
+
+    # No name: open the visual theme picker (kox-pickers family; Quickshell
+    # coverflow with a fuzzel fallback, applies waybar/fuzzel/mako/kitty).
+    if [[ -z $name ]]; then
+        cmd_picker kox-theme
+    fi
+
+    src="$KOX_REPO/themes/$name.css"
+    if [[ ! -f $src ]]; then
+        # Not a repo-packaged accent theme: route to the visual-picker theme
+        # table (the rice's 11 themes: cachy-dark, dracula, ...). cmd_picker
+        # execs, so control never comes back here.
+        cmd_picker kox-theme "$name"
+    fi
+
+    dest="$HOME/.config/waybar/theme-accent.css"
+    if [[ ! -d ${dest%/*} ]]; then
+        printf '  %skox:%s waybar config directory not found: %s\n' \
+            "$RED" "$RESET" "${dest%/*}" >&2
+        return 1
+    fi
+
+    if ! cp -- "$src" "$dest"; then
+        printf '  %skox:%s could not write %s\n' \
+            "$RED" "$RESET" "$dest" >&2
+        return 1
+    fi
+
+    if pkill -SIGUSR2 waybar 2>/dev/null; then
+        printf '  %s✓%s accent: %s%s%s · Waybar reloaded\n' \
+            "$GREEN" "$RESET" "$BOLD" "$name" "$RESET"
+    else
+        printf '  %s✓%s accent: %s%s%s · Waybar not running (applies next start)\n' \
+            "$GREEN" "$RESET" "$BOLD" "$name" "$RESET"
+    fi
+    return 0
+}
+
+unknown_command() {
+    printf '  %skox:%s unknown command %s%s%s\n' \
+        "$RED" "$RESET" "$BOLD" "$1" "$RESET" >&2
+    printf '  run %skox help%s to see the command list.\n' "$CYAN" "$RESET" >&2
+    return 2
+}
+
+main() {
+    local cmd=${1:-help}
+
+    if (( $# > 0 )); then
+        shift
+    fi
+
+    case $cmd in
+        update)          cmd_update "$@" ;;
+        theme)           cmd_theme "$@" ;;
+        wallpaper)       cmd_wallpaper "$@" ;;
+        bar)             cmd_bar "$@" ;;
+        cursor)          cmd_cursor "$@" ;;
+        scale)           cmd_scale "$@" ;;
+        lock)            cmd_lock "$@" ;;
+        doctor)          cmd_doctor ;;
+        help|-h|--help)  cmd_help ;;
+        *)               unknown_command "$cmd" ;;
+    esac
+}
+
+main "$@"
+exit $?

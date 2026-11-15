@@ -13,7 +13,7 @@
 set -u
 
 STATE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/kox-bt-state.json"
-BT_SCRIPT="${KOX_BT_SCRIPT:-$HOME/.local/bin/kox/kox-bluetooth}"
+BT_SCRIPT="${KOX_BT_SCRIPT:-$HOME/.local/bin/kox-widgets/kox-bluetooth}"
 SIGNAL=8 # waybar "signal": 8 → SIGRTMIN+8
 
 # One watcher per session (flock guard, same idea as kox-panel-autostart).
