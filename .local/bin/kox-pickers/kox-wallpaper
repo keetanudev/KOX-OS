@@ -126,9 +126,10 @@ apply() { # $1 = image path
 if [[ "${1:-}" == "--restore" ]]; then
   SAVED="$(cat "$STATE" 2>/dev/null || true)"
   if [[ -r "$SAVED" ]]; then
-    apply "$SAVED"
+    apply "$SAVED" || exit 1
   else
     notify-send "Wallpaper" "No saved wallpaper found" 2>/dev/null || true
+    exit 1
   fi
   exit 0
 fi

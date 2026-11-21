@@ -73,6 +73,7 @@ if [[ -z "$TARGET_HOME" ]]; then
     TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 fi
 PROFILE_FILE="$TARGET_HOME/.bash_profile"
+WALLPAPER_DIR="$TARGET_HOME/Pictures/Wallpapers"
 
 BACKUP_DIR=""
 KOX_USER_NAME=""
@@ -322,7 +323,11 @@ ensure_user_service() {
 preflight() {
     step "Pre-flight checks"
 
-    [[ -t 0 ]] || die "This installer is interactive. Run it directly from a terminal."
+    # Only the fresh-install path prompts (for the display name). `kox update`
+    # sets KOX_ASSUME_DEFAULTS=1 and must work from a non-interactive context.
+    if [[ "${KOX_ASSUME_DEFAULTS:-0}" != "1" ]]; then
+        [[ -t 0 ]] || die "This installer is interactive. Run it directly from a terminal."
+    fi
     [[ "${EUID:-$(id -u)}" -ne 0 ]] || die "Do not run this installer as root. Run it as your normal user; it will ask for sudo when needed."
     [[ -n "$TARGET_HOME" && -d "$TARGET_HOME" ]] || die "Could not determine the home directory for $TARGET_USER."
     ok "Running as non-root user: $TARGET_USER"
@@ -341,6 +346,32 @@ preflight() {
     [[ -d "$REPO_DIR/.config" ]] || die "Repository is incomplete: missing $REPO_DIR/.config"
     [[ -d "$REPO_DIR/.local" ]] || die "Repository is incomplete: missing $REPO_DIR/.local"
     [[ -d "$REPO_DIR/.local/bin" ]] || die "Repository is incomplete: missing $REPO_DIR/.local/bin"
+    [[ -r "$REPO_DIR/.config/kox-pickers/kox-coverflow.qml" ]] ||
+        die "Repository is incomplete: missing $REPO_DIR/.config/kox-pickers/kox-coverflow.qml (theme picker would fall back to fuzzel)"
+    [[ -r "$REPO_DIR/.local/bin/kox-pickers/kox-coverflow" ]] ||
+        die "Repository is incomplete: missing $REPO_DIR/.local/bin/kox-pickers/kox-coverflow"
+    [[ -r "$REPO_DIR/.local/bin/kox-pickers/kox-theme" ]] ||
+        die "Repository is incomplete: missing $REPO_DIR/.local/bin/kox-pickers/kox-theme"
+    [[ -r "$REPO_DIR/.local/bin/kox-pickers/kox-wallpaper" ]] ||
+        die "Repository is incomplete: missing $REPO_DIR/.local/bin/kox-pickers/kox-wallpaper"
+    [[ -d "$REPO_DIR/wallpapers" ]] ||
+        die "Repository is incomplete: missing $REPO_DIR/wallpapers (theme previews and wallpapers would be blank)"
+
+    # Fail before touching the live system if the theme table references an
+    # image the repository does not ship. This is the check that would have
+    # caught the original fresh-install regression.
+    if [[ -r "$REPO_DIR/.local/bin/kox-pickers/kox-theme" ]]; then
+        local wall missing_walls=()
+        while IFS= read -r wall; do
+            [[ -r "$REPO_DIR/wallpapers/$wall" ]] || missing_walls+=("$wall")
+        done < <(grep -oE 'Pictures/Wallpapers/[^|"]+' \
+            "$REPO_DIR/.local/bin/kox-pickers/kox-theme" 2>/dev/null |
+            sed 's|.*/||' | sort -u)
+        if ((${#missing_walls[@]} > 0)); then
+            die "Repository is incomplete: missing wallpaper(s): ${missing_walls[*]}"
+        fi
+    fi
+
     ok "KOX OS repository found at $REPO_DIR"
 
     info "Requesting sudo privileges ..."
@@ -471,6 +502,49 @@ deploy_dotfiles() {
     ok "Dotfiles deployed to $TARGET_HOME"
 }
 
+deploy_wallpapers() {
+    step "Installing wallpapers"
+
+    if [[ ! -d "$REPO_DIR/wallpapers" ]]; then
+        warn "Repository has no wallpapers/ directory; the theme previews and default wallpaper will be missing."
+        return 0
+    fi
+
+    mkdir -p "$WALLPAPER_DIR"
+
+    local src name dst count=0 skipped=0
+    for src in "$REPO_DIR"/wallpapers/*; do
+        [[ -f "$src" ]] || continue
+        name="$(basename -- "$src")"
+        dst="$WALLPAPER_DIR/$name"
+
+        # The collection is user-visible; never clobber a file the user has
+        # put there. A zero-byte leftover is treated as missing so a failed
+        # earlier copy can heal.
+        if [[ -s "$dst" ]]; then
+            skipped=$((skipped + 1))
+            continue
+        fi
+
+        if cp --preserve=mode,timestamps -- "$src" "$dst"; then
+            chmod 644 -- "$dst" 2>/dev/null || true
+            count=$((count + 1))
+        else
+            warn "Could not install wallpaper: $name"
+        fi
+    done
+
+    if ((count > 0)); then
+        ok "$count wallpaper(s) installed in $WALLPAPER_DIR."
+    fi
+    if ((skipped > 0)); then
+        info "$skipped wallpaper(s) already present; left untouched."
+    fi
+    if ((count == 0 && skipped == 0)); then
+        warn "No wallpaper files found in $REPO_DIR/wallpapers."
+    fi
+}
+
 make_scripts_executable() {
     step "Setting executable permissions"
 
@@ -493,6 +567,119 @@ make_scripts_executable() {
     done < <(find "$dir" -type f -print0)
 
     ok "$count script(s) marked executable (including kox-pickers/ and kox-widgets/ when present)."
+}
+
+clear_stale_kitty_cache() {
+    # Kitty stores the last OS-window state here. A pre-fix cache says
+    # "maximized", which made new terminals open fullscreen even after
+    # remember_window_size was disabled. It is pure cache: safe to drop.
+    local cache="$TARGET_HOME/.cache/kitty/main.json"
+    if [[ -f "$cache" ]]; then
+        rm -f -- "$cache"
+        info "Cleared kitty's stale window-state cache."
+    fi
+}
+
+restore_user_choices() {
+    step "Restoring saved appearance"
+
+    local pickers="$TARGET_HOME/.local/bin/kox-pickers"
+    local state="$TARGET_HOME/.config/kox/pickers"
+
+    if [[ -s "$state/theme" || -s "$state/accent" ]]; then
+        if [[ -x "$pickers/kox-theme" ]]; then
+            info "Re-applying the saved theme ..."
+            if "$pickers/kox-theme" --restore; then
+                ok "Theme restored."
+            else
+                warn "Could not restore the saved theme."
+            fi
+        else
+            warn "kox-theme is missing; the saved theme was not restored."
+        fi
+    else
+        info "No saved theme; keeping the shipped defaults."
+    fi
+
+    if [[ -s "$state/wallpaper" ]]; then
+        if [[ -x "$pickers/kox-wallpaper" ]]; then
+            info "Re-applying the saved wallpaper ..."
+            if "$pickers/kox-wallpaper" --restore; then
+                ok "Wallpaper restored."
+            else
+                warn "Could not restore the saved wallpaper."
+            fi
+        else
+            warn "kox-wallpaper is missing; the saved wallpaper was not restored."
+        fi
+    fi
+
+    if [[ -s "$state/cursor" ]]; then
+        if [[ -x "$pickers/kox-cursor" ]]; then
+            info "Re-applying the saved cursor ..."
+            if "$pickers/kox-cursor" --restore; then
+                ok "Cursor restored."
+            else
+                warn "Could not restore the saved cursor."
+            fi
+        else
+            warn "kox-cursor is missing; the saved cursor was not restored."
+        fi
+    fi
+}
+
+verify_deploy() {
+    step "Verifying appearance deployment"
+
+    local failed=0
+    local qml="$TARGET_HOME/.config/kox-pickers/kox-coverflow.qml"
+    local kitty="$TARGET_HOME/.config/kitty/kitty.conf"
+    local paper="$TARGET_HOME/.config/hypr/hyprpaper.conf"
+    local theme_script="$TARGET_HOME/.local/bin/kox-pickers/kox-theme"
+
+    if [[ -r "$qml" ]]; then
+        ok "Theme picker QML is installed."
+    else
+        warn "Missing $qml; kox theme would fall back to fuzzel."
+        failed=1
+    fi
+
+    if grep -qE '^[[:space:]]*remember_window_size[[:space:]]+no' "$kitty" 2>/dev/null; then
+        ok "Kitty will not restore a maximized window."
+    else
+        warn "kitty.conf does not disable remembered window size; kitty may open fullscreen."
+        failed=1
+    fi
+
+    if grep -qE '^[[:space:]]*path[[:space:]]*=[[:space:]]*.*Pictures/Wallpapers/' "$paper" 2>/dev/null; then
+        ok "Hyprpaper points at the wallpaper collection."
+    else
+        warn "hyprpaper.conf does not point into ~/Pictures/Wallpapers."
+        failed=1
+    fi
+
+    if [[ -r "$theme_script" ]]; then
+        local wall missing_walls=()
+        while IFS= read -r wall; do
+            [[ -r "$WALLPAPER_DIR/$wall" ]] || missing_walls+=("$wall")
+        done < <(grep -oE 'Pictures/Wallpapers/[^|"]+' "$theme_script" 2>/dev/null |
+            sed 's|.*/||' | sort -u)
+        if ((${#missing_walls[@]} == 0)); then
+            ok "All theme wallpapers are present."
+        else
+            warn "Missing theme wallpaper(s): ${missing_walls[*]}"
+            failed=1
+        fi
+    else
+        warn "kox-theme is missing; could not verify the wallpaper collection."
+        failed=1
+    fi
+
+    if ((failed == 0)); then
+        ok "Appearance deployment verified."
+    else
+        warn "Appearance deployment has gaps; see the warnings above."
+    fi
 }
 
 ensure_path_block() {
@@ -715,10 +902,14 @@ main() {
     install_packages
     backup_existing_configs
     deploy_dotfiles
+    deploy_wallpapers
     make_scripts_executable
+    clear_stale_kitty_cache
+    restore_user_choices
     configure_shell
     setup_services
     setup_groups
+    verify_deploy
     print_final
 }
 

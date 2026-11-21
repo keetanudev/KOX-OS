@@ -34,6 +34,7 @@ set -u
 
 STATE_DIR="$HOME/.config/kox/pickers"
 STATE="$STATE_DIR/theme"
+ACCENT_STATE="$STATE_DIR/accent"
 ACCENT_CSS="$HOME/.config/waybar/theme-accent.css"
 KITTY_CONF="$HOME/.config/kitty/kitty.conf"
 KITTY_SOCKET="unix:@kox-kitty"
@@ -192,8 +193,8 @@ apply_spec() { # $1 = spec line
   block="$(printf '# BEGIN KOX theme (managed by kox-theme — do not edit by hand)\ncursor %s\nurl_color %s\nactive_border_color %s\n# END KOX theme\n' "$accent" "$accent" "$accent")"
   if [[ -f "$KITTY_CONF" ]]; then
     sed -i '/^# BEGIN KOX theme/,/^# END KOX theme/d' "$KITTY_CONF"
+    printf '%s\n' "$block" >> "$KITTY_CONF"
   fi
-  printf '%s\n' "$block" >> "$KITTY_CONF"
   if pgrep -x kitty >/dev/null 2>&1; then
     local tmp; tmp="$(mktemp /tmp/kox-kitty-colors.XXXXXX)"
     printf 'cursor %s\nurl_color %s\nactive_border_color %s\n' "$accent" "$accent" "$accent" > "$tmp"
@@ -204,7 +205,7 @@ apply_spec() { # $1 = spec line
   # 5. Wallpaper swap (the rice's theme = accent + wallpaper). Routed
   #    through kox-wallpaper --set so the hyprpaper apply path (conf
   #    rewrite + daemon restart + state file) stays owned by one script.
-  if [[ -r "$wall" ]]; then
+  if [[ -x "$HOME/.local/bin/kox-pickers/kox-wallpaper" && -r "$wall" ]]; then
     "$HOME/.local/bin/kox-pickers/kox-wallpaper" --set "$wall" >/dev/null 2>&1 || true
   fi
 
@@ -237,6 +238,8 @@ apply_spec() { # $1 = spec line
   ini_set "$HOME/.config/gtk-4.0/settings.ini" gtk-application-prefer-dark-theme "$darkflag"
 
   printf '%s\n' "$name" > "$STATE"
+  # A coverflow theme supersedes a direct accent-only selection.
+  rm -f "$ACCENT_STATE"
   if gtk_theme_installed "$gtk"; then
     notify "$name applied"
   else
@@ -245,9 +248,33 @@ apply_spec() { # $1 = spec line
 }
 
 if [[ "${1:-}" == "--restore" ]]; then
-  # Nothing needed at login: every consumer reads a file that already
-  # carries the choice (accent css, fuzzel.ini, mako/config, kitty.conf,
-  # theme-border via looknfeel.lua, gtk settings.ini). Kept as a hook.
+  # Re-apply the saved choice after a dotfile deploy. Every consumer reads
+  # a file, but the installer overwrites those files with the shipped
+  # defaults, so restoring has to write the saved choice back.
+  SAVED="$(cat "$STATE" 2>/dev/null || true)"
+  if [[ -n "$SAVED" ]]; then
+    for spec in "${THEMES[@]}"; do
+      if [[ "$(spec_field "$spec" 1)" == "$SAVED" ]]; then
+        apply_spec "$spec"
+        exit 0
+      fi
+    done
+    # Unknown/removed theme: leave the deployed defaults alone.
+    exit 0
+  fi
+
+  # Direct accent selections (`kox theme blue`) have no coverflow card;
+  # `kox` persists the palette name instead of a theme-table entry.
+  SAVED_ACCENT="$(cat "$ACCENT_STATE" 2>/dev/null || true)"
+  if [[ -n "$SAVED_ACCENT" ]]; then
+    for repo_dir in "${KOX_REPO:-$HOME/KOX-OS}" "$HOME/KOX-OS"; do
+      if [[ -r "$repo_dir/themes/$SAVED_ACCENT.css" ]]; then
+        cp -- "$repo_dir/themes/$SAVED_ACCENT.css" "$ACCENT_CSS"
+        pkill -USR2 -x waybar 2>/dev/null || true
+        exit 0
+      fi
+    done
+  fi
   exit 0
 fi
 

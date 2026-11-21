@@ -263,6 +263,36 @@ cmd_cursor() {
 cmd_update() {
     local repo=$KOX_REPO
 
+    # Validate the whole update path before touching the system: a package
+    # update followed by a failed pull would leave the machine half-updated.
+    if ! command -v git >/dev/null 2>&1; then
+        printf '\n  %skox:%s git is required for updates.\n' \
+            "$RED" "$RESET" >&2
+        return 1
+    fi
+    if ! command -v sudo >/dev/null 2>&1; then
+        printf '\n  %skox:%s sudo is required for updates.\n' \
+            "$RED" "$RESET" >&2
+        return 1
+    fi
+    if [[ ! -d "$repo/.git" ]]; then
+        printf '\n  %skox:%s dotfiles repo not found: %s\n' \
+            "$RED" "$RESET" "$repo" >&2
+        return 1
+    fi
+    if ! git -C "$repo" diff --quiet 2>/dev/null ||
+        ! git -C "$repo" diff --cached --quiet 2>/dev/null; then
+        printf '\n  %skox:%s local changes in %s.\n' \
+            "$RED" "$RESET" "$repo" >&2
+        printf '  Commit or stash them before running kox update.\n' >&2
+        return 1
+    fi
+    if [[ ! -f "$repo/install.sh" ]]; then
+        printf '\n  %skox:%s installer missing from %s.\n' \
+            "$RED" "$RESET" "$repo" >&2
+        return 1
+    fi
+
     printf '\n  %sUpdating System Packages...%s\n' "$BOLD$CYAN" "$RESET"
     if ! sudo pacman -Syu --noconfirm; then
         printf '\n  %skox:%s system update failed; dotfiles not updated.\n' \
@@ -271,12 +301,7 @@ cmd_update() {
     fi
 
     printf '\n  %sUpdating KOX OS Dotfiles...%s\n' "$BOLD$CYAN" "$RESET"
-    if ! cd "$repo"; then
-        printf '\n  %skox:%s dotfiles repo not found: %s\n' \
-            "$RED" "$RESET" "$repo" >&2
-        return 1
-    fi
-    if ! git pull --ff-only; then
+    if ! git -C "$repo" pull --ff-only; then
         printf '\n  %skox:%s dotfiles update failed.\n' \
             "$RED" "$RESET" >&2
         return 1
@@ -286,17 +311,14 @@ cmd_update() {
     # ~/.local/bin keep the old files until the installer deploys them, so
     # run its idempotent deploy as part of the update. This is what makes
     # `kox update` actually change the desktop, not just ~/KOX-OS.
-    if [[ -x "$repo/install.sh" ]]; then
-        printf '\n  %sApplying the updated dotfiles...%s\n' "$BOLD$CYAN" "$RESET"
-        export KOX_ASSUME_DEFAULTS=1
-        exec "$repo/install.sh"
-    fi
+    # `bash` is deliberate: a bad mode bit in the clone must not turn the
+    # update into a silent no-op.
+    printf '\n  %sApplying the updated dotfiles...%s\n' "$BOLD$CYAN" "$RESET"
+    export KOX_ASSUME_DEFAULTS=1
+    exec bash "$repo/install.sh"
 
-    printf '\n  %s✓ KOX OS is up to date.%s\n\n' "$GREEN" "$RESET"
-
-    # A successful pull can replace this very script. Exit from the parsed
-    # function body before Bash reads any further bytes from the new file.
-    exit 0
+    # A successful pull can replace this very script. exec above replaces
+    # the process, so Bash never reads further bytes from the new file.
 }
 
 cmd_theme() {
@@ -329,6 +351,12 @@ cmd_theme() {
             "$RED" "$RESET" "$dest" >&2
         return 1
     fi
+
+    # Persist the accent-only choice for the installer's restore pass, and
+    # drop a previous coverflow theme so restore cannot resurrect it.
+    mkdir -p "$HOME/.config/kox/pickers"
+    printf '%s\n' "$name" > "$HOME/.config/kox/pickers/accent"
+    rm -f "$HOME/.config/kox/pickers/theme"
 
     if pkill -SIGUSR2 waybar 2>/dev/null; then
         printf '  %s✓%s accent: %s%s%s · Waybar reloaded\n' \
