@@ -359,6 +359,14 @@ preflight() {
 ask_user_name() {
     step "User configuration"
 
+    # `kox update` re-runs this installer to deploy the pulled dotfiles;
+    # there is nothing to ask in that mode, so accept the account default.
+    if [[ "${KOX_ASSUME_DEFAULTS:-0}" == "1" ]]; then
+        KOX_USER_NAME="$TARGET_USER"
+        ok "Welcome, $KOX_USER_NAME."
+        return 0
+    fi
+
     local entered=""
     info "Installing for account: $TARGET_USER"
     printf '  %sFull name%s [%s]: ' "$BOLD" "$RESET" "$TARGET_USER"

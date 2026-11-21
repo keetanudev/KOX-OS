@@ -186,7 +186,7 @@ cmd_help() {
     printf '    %skox%s <command> [args]\n' "$BOLD" "$RESET"
 
     printf '\n  %sSYSTEM%s\n' "$CYAN" "$RESET"
-    help_row update "sync packages + pull the dotfiles repo"
+    help_row update "sync packages, pull the dotfiles repo and deploy them"
     help_row "scale <number>" "set UI type scale (9-20, current, reset, apply)"
 
     printf '\n  %sAPPEARANCE%s\n' "$CYAN" "$RESET"
@@ -276,10 +276,20 @@ cmd_update() {
             "$RED" "$RESET" "$repo" >&2
         return 1
     fi
-    if ! git pull; then
+    if ! git pull --ff-only; then
         printf '\n  %skox:%s dotfiles update failed.\n' \
             "$RED" "$RESET" >&2
         return 1
+    fi
+
+    # Pulling only refreshes the repository. The live ~/.config and
+    # ~/.local/bin keep the old files until the installer deploys them, so
+    # run its idempotent deploy as part of the update. This is what makes
+    # `kox update` actually change the desktop, not just ~/KOX-OS.
+    if [[ -x "$repo/install.sh" ]]; then
+        printf '\n  %sApplying the updated dotfiles...%s\n' "$BOLD$CYAN" "$RESET"
+        export KOX_ASSUME_DEFAULTS=1
+        exec "$repo/install.sh"
     fi
 
     printf '\n  %s✓ KOX OS is up to date.%s\n\n' "$GREEN" "$RESET"
