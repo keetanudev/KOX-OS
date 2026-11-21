@@ -589,7 +589,9 @@ restore_user_choices() {
     if [[ -s "$state/theme" || -s "$state/accent" ]]; then
         if [[ -x "$pickers/kox-theme" ]]; then
             info "Re-applying the saved theme ..."
-            if "$pickers/kox-theme" --restore; then
+            # KOX_REPO lets accent-only restores find themes/<name>.css even
+            # when the repository is not at the default ~/KOX-OS path.
+            if KOX_REPO="$REPO_DIR" "$pickers/kox-theme" --restore; then
                 ok "Theme restored."
             else
                 warn "Could not restore the saved theme."
