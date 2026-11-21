@@ -508,9 +508,10 @@ ensure_autologin_block() {
 if [[ "$(tty)" == "/dev/tty1" ]] \
    && [[ -z "$WAYLAND_DISPLAY" && -z "$DISPLAY" ]] \
    && [[ -z "$KOX_NO_SESSION" ]] \
-   && command -v Hyprland >/dev/null 2>&1
+   && command -v start-hyprland >/dev/null 2>&1
 then
-    exec Hyprland
+    # KOX OS: launch via the proper watchdog launcher (no boot warning).
+    exec start-hyprland
 fi
 EOF
         printf '%s\n' "$AUTOLOGIN_END"
