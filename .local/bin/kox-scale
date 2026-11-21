@@ -312,9 +312,11 @@ restart_waybar() {
     # Same lock as kox-waybar-autostart. At boot the guard is still watching
     # the bar it just spawned; killing that bar here made the guard read the
     # deliberate kill as a crash and respawn it, leaving two bars. Wait for
-    # the guard's watch to finish, then restart under the lock.
+    # the guard's watch to finish, then restart under the lock. 15 s covers
+    # the guard's full bounded retry window (3 attempts x ~2.3 s) even on a
+    # slow first boot.
     (
-        flock -w 5 8 || true
+        flock -w 15 8 || true
         printf '[%s] scale: restarting waybar (height change)\n' \
             "$(date '+%F %T.%3N')" >>/tmp/kox-waybar.log
         pkill -x waybar 2>/dev/null || true

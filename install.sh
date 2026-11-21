@@ -454,6 +454,17 @@ deploy_dotfiles() {
     info "Installing ~/.config ..."
     cp -aT --remove-destination "$REPO_DIR/.config" "$TARGET_HOME/.config"
 
+    # The shipped dotfiles are authored at UI scale 10 (Waybar height 24,
+    # theme-scale.css 10px, kitty 8pt, fuzzel 12, mako 10). Seed the scale
+    # state on first install so the first boot's `kox-scale apply` is a
+    # byte-level no-op; on updates this file is live-only, so a user's
+    # chosen scale is preserved.
+    if [[ ! -e "$TARGET_HOME/.config/kox/ui-scale" ]]; then
+        mkdir -p "$TARGET_HOME/.config/kox"
+        printf '10\n' > "$TARGET_HOME/.config/kox/ui-scale"
+        chmod 644 "$TARGET_HOME/.config/kox/ui-scale"
+    fi
+
     info "Installing ~/.local ..."
     cp -aT --remove-destination "$REPO_DIR/.local" "$TARGET_HOME/.local"
 
