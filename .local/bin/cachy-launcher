@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# cachy-launcher: fuzzel application launcher (Omarchy Super+Space equivalent).
+exec fuzzel

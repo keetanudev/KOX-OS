@@ -10,6 +10,7 @@ require("input")
 require("looknfeel")
 require("bindings")
 require("autostart")
+require("rules")
 
 -- Unset Hyprland branding
 hl.config({

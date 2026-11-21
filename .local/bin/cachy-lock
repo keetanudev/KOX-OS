@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# cachy-lock: session lock entry point for Super+Ctrl+L.
+#
+# Primary: Ryoku orbital clock lockscreen (quickshell/QML, user-level bundle
+# at ~/.local/share/quickshell-lockscreen, extracted from Ryoku-Arch by
+# Rizmi — GPL-3.0, origin darkkal44/qylock). Authenticates via its own
+# PAM snippet assets/pam/ryoku-lock (password-only, pam_unix).
+#
+# Fallback: if the orbital bundle fails to start or quickshell is missing,
+# drop to the rice's stock hyprlock (~/.config/hypr/hyprlock.conf) so the
+# session is never left unlocked.
+set -u
+LOCK="$HOME/.local/share/quickshell-lockscreen/lock.sh"
+
+if [ -x "$LOCK" ] && command -v quickshell >/dev/null 2>&1; then
+    "$LOCK"
+    rc=$?
+    # 0 = unlocked normally. Anything else (crash, missing theme, pam
+    # session error) is logged once and falls back.
+    if [ $rc -eq 0 ]; then
+        exit 0
+    fi
+    echo "cachy-lock: orbital lockscreen exited rc=$rc; falling back to hyprlock" >&2
+fi
+
+exec hyprlock

@@ -164,6 +164,14 @@ PACKAGES=(
     xdg-utils
     git
 
+    # Keybind/panel surface (Super+Space/D, Super+Escape, Super+Shift+F,
+    # audio/media keys, Print capture/record, Super+Shift+N/CTRL+T, ...)
+    playerctl
+    wf-recorder
+    nautilus
+    micro
+    btop
+
     # Fonts
     ttf-jetbrains-mono-nerd
     ttf-nerd-fonts-symbols
@@ -491,7 +499,23 @@ ensure_path_block() {
 ensure_autologin_block() {
     if grep -qF "$AUTOLOGIN_BEGIN" "$PROFILE_FILE" ||
         grep -qF "KOX OS - start the Wayland session automatically at login." "$PROFILE_FILE"; then
-        info "Hyprland autologin block already present; leaving it untouched."
+        # Older installs appended the block with a legacy `exec Hyprland`
+        # (pre-watchdog): upgrade it in place so the next boot goes through
+        # the watchdog launcher, matching the current block.
+        local legacy_word cond_word new_word
+        legacy_word=$(grep -m1 -oE "exec [A-Za-z-]+$" "$PROFILE_FILE" | sed -e 's/^exec //' || true)
+        cond_word=$(grep -m1 -oE "command -v [A-Za-z-]+" "$PROFILE_FILE" | sed -e 's/^command -v //' || true)
+        new_word=$(ls /usr/bin 2>/dev/null | grep -iE "^start-hyp" | head -n 1 || true)
+        if [[ -n "$legacy_word" && -n "$new_word" && "$legacy_word" != "$new_word" ]]; then
+            info "Updating legacy autologin block: ${legacy_word} -> ${new_word} ..."
+            sed -i -e "s/exec ${legacy_word}$/exec ${new_word}/" "$PROFILE_FILE"
+            if [[ -n "$cond_word" ]]; then
+                sed -i -e "s/command -v ${cond_word} /command -v ${new_word} /" "$PROFILE_FILE"
+            fi
+            ok "Autologin block updated."
+        else
+            info "Hyprland autologin block already present; leaving it untouched."
+        fi
         return 0
     fi
 

@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# kox-cursor: KOX OS cursor theme selector.
+#
+# Deliberately lightweight (fuzzel dmenu, no coverflow): cursor themes have
+# no meaningful preview imagery, and the rice's cachy-cursor could not even
+# run here (its preview tiles needed ImageMagick, absent on KOX).
+#
+# Sources: any theme directory containing a cursors/ subdir, from
+# /usr/share/icons + the user icon dirs.
+# Applies (per selection):
+#   - hyprctl setcursor <theme> <size>   live, Hyprland-native (size 24)
+#   - gsettings cursor-theme <theme>     live, GTK/libadwaita apps
+#   - gtk-cursor-theme-name in the gtk-3.0/4.0 settings.ini pair (persistent)
+#   - state file ~/.config/kox/pickers/cursor (for --restore)
+# No systemd, no daemons — everything is a file write + one hyprctl call.
+#
+# Usage: kox-cursor [--restore | <theme-name>]
+set -u
+
+STATE_DIR="$HOME/.config/kox/pickers"
+STATE="$STATE_DIR/cursor"
+CURSOR_SIZE="${KOX_CURSOR_SIZE:-24}"
+PROMPT="Cursor: "
+
+mkdir -p "$STATE_DIR"
+
+notify() { notify-send "Cursor" "$1" 2>/dev/null || true; }
+
+# ini_set <file> <key> <value> — upsert under [Settings], preserving other
+# keys (same helper contract as kox-theme's).
+ini_set() {
+  local file="$1" key="$2" val="$3"
+  if [[ ! -f "$file" ]]; then
+    mkdir -p "$(dirname "$file")"
+    printf '[Settings]\n' > "$file"
+  fi
+  if grep -qE "^${key}=" "$file"; then
+    sed -i -E "s|^${key}=.*|${key}=${val}|" "$file"
+  else
+    sed -i "/^\[Settings\]/a ${key}=${val}" "$file"
+  fi
+}
+
+list_themes() {
+  local d
+  {
+    find /usr/share/icons -maxdepth 2 -name cursors -type d 2>/dev/null
+    find "$HOME/.icons" "$HOME/.local/share/icons" \
+         -maxdepth 2 -name cursors -type d 2>/dev/null
+  } | while IFS= read -r d; do basename "$(dirname "$d")"; done | sort -u
+}
+
+apply() { # $1 = theme name
+  local theme="$1"
+  [[ -n "$theme" ]] || return 1
+  # 1. Hyprland-native apply (session); non-fatal if the keyword is absent
+  #    in this build — gsettings below still covers every GTK app.
+  hyprctl setcursor "$theme" "$CURSOR_SIZE" >/dev/null 2>&1 || true
+  # 2. GTK/libadwaita apps, live.
+  command -v gsettings >/dev/null 2>&1 \
+    && gsettings set org.gnome.desktop.interface cursor-theme "$theme" >/dev/null 2>&1
+  # 3. Persist for future sessions (settings.ini pair).
+  ini_set "$HOME/.config/gtk-3.0/settings.ini" gtk-cursor-theme-name "$theme"
+  ini_set "$HOME/.config/gtk-4.0/settings.ini" gtk-cursor-theme-name "$theme"
+  # 4. State.
+  printf '%s\n' "$theme" > "$STATE"
+  notify "$theme (size $CURSOR_SIZE)"
+}
+
+if [[ "${1:-}" == "--restore" ]]; then
+  SAVED="$(cat "$STATE" 2>/dev/null || true)"
+  if [[ -n "$SAVED" ]]; then
+    apply "$SAVED"
+  else
+    notify "No saved cursor theme found"
+  fi
+  exit 0
+fi
+
+if [[ $# -ge 1 ]]; then
+  apply "$1"
+  exit 0
+fi
+
+# Active marker: state file first, else the live gsettings value.
+CURRENT="$(cat "$STATE" 2>/dev/null || true)"
+if [[ -z "$CURRENT" ]] && command -v gsettings >/dev/null 2>&1; then
+  CURRENT="$(gsettings get org.gnome.desktop.interface cursor-theme 2>/dev/null | tr -d \')" || CURRENT=""
+fi
+
+THEMES=()
+while IFS= read -r t; do THEMES+=("$t"); done < <(list_themes)
+[[ ${#THEMES[@]} -eq 0 ]] && { notify "No cursor themes found in /usr/share/icons"; exit 1; }
+
+# Fuzzel dmenu (Rofi icon protocol unused — cursor themes have no previews).
+CHOICE="$(for t in "${THEMES[@]}"; do
+  [[ "$t" == "$CURRENT" ]] && printf '* %s (active)\n' "$t" || printf '%s\n' "$t"
+done | fuzzel --dmenu --prompt "$PROMPT")" || exit 0
+THEME="$(printf '%s' "$CHOICE" | sed -E 's/^\* //; s/ \(active\)$//')"
+[[ -z "$THEME" ]] && exit 0
+apply "$THEME"

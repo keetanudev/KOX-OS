@@ -21,7 +21,7 @@ if [[ "$(tty)" == "/dev/tty1" ]] \
    && command -v start-hyprland >/dev/null 2>&1
 then
     # KOX OS: launch via the proper watchdog launcher. Launching `Hyprland`
-    # directly makes Hyprland print "launched without start-hyprand" on
+    # directly makes Hyprland print "launched without start-hyprland" on
     # every boot; start-hyprland is the supported way in (verified: starts
     # cleanly, no warning).
     exec start-hyprland

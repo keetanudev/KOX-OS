@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# cachy-powermenu: premium fuzzel-based system menu (Super+Escape equivalent).
+set -euo pipefail
+
+MENU_CFG="$HOME/.config/fuzzel/powermenu.ini"
+CHOICE="$(printf '%s\n' \
+  '󰌾   Lock' \
+  '󰤄   Suspend' \
+  '󰑐   Reboot' \
+  '󰐥   Power off' \
+  '󰗼   Log out' |
+  fuzzel --config "$MENU_CFG" --dmenu \
+        --mesg "Power & session" --prompt '  ')" || exit 0
+
+# Strip the leading glyph (and surrounding spaces) to recover the action label.
+ACTION="${CHOICE#*   }"
+
+case "$ACTION" in
+  Lock)       exec cachy-lock ;;
+  Suspend)    exec loginctl suspend ;;
+  Reboot)     exec loginctl reboot ;;
+  "Power off") exec loginctl poweroff ;;
+  "Log out")  exec cachy-hyprctl dispatch 'hl.dsp.exit()' ;;
+esac

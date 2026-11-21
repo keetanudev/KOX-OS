@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# cachy-close-all: close every window (Omarchy Ctrl+Alt+Del equivalent).
+# Uses Hyprland 0.56 Lua dispatch syntax; legacy `dispatch closewindow` is rejected.
+set -euo pipefail
+hyprctl clients -j 2>/dev/null | python3 -c '
+import json, subprocess, sys
+for c in json.load(sys.stdin):
+    addr = c.get("address", "")
+    subprocess.run(["hyprctl", "dispatch", f"hl.dsp.window.close({{ address = \"{addr}\" }})"],
+                   capture_output=True)
+'

@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# cachy-media: play-pause wrapper that suppresses the Evision ghost.
+# Physical "]" emits bogus PLAYPAUSE on event5 alongside real RIGHTBRACE on
+# event4. Fail-open: missing state = allow (real buttons keep working).
+set -u
+WINDOW="${CACHY_KB_GHOST_WINDOW:-0.25}"
+STATEDIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/cachy-kb-ghost"
+
+recent() {
+  local f="$STATEDIR/$1" now ts
+  [[ -r "$f" ]] || return 1
+  ts=$(cat "$f" 2>/dev/null) || return 1
+  now=$(python3 -c 'import time; print(time.monotonic())')
+  python3 -c "import sys; sys.exit(0 if ($now - $ts) < $WINDOW else 1)"
+}
+
+case "${1:-}" in
+  play-pause) recent rightbrace && exit 0; exec playerctl play-pause ;;
+  next)       exec playerctl next ;;
+  previous)   exec playerctl previous ;;
+  *) echo "usage: $0 {play-pause|next|previous}" >&2; exit 2 ;;
+esac

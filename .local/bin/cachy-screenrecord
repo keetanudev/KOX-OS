@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# cachy-screenrecord: toggle a lightweight, high-quality screen recording.
+#
+#   Alt+Print                  start / stop (bound in ~/.config/hypr/bindings.lua)
+#   cachy-screenrecord region  pick an area with slurp instead of the full screen
+#
+# Video: Intel VAAPI HEVC (hardware encoded, ~12 Mbps, 60 fps); falls back to
+# x264 on machines without the VAAPI HEVC encoder. Audio: the monitor of the
+# current default output (desktop audio); CACHY_REC_AUDIO=mic records the
+# microphone instead, =none records silently.
+#
+# Output: ~/Videos/ScreenRecords/recording-YYYYmmdd-HHMMSS.mp4
+# State:  $XDG_RUNTIME_DIR/cachy-screenrecord, read by
+#         cachy-screenrecord-status for the Waybar "custom/recording" indicator.
+set -euo pipefail
+
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/cachy-screenrecord"
+PIDFILE="$STATE_DIR/pid"
+FILEFILE="$STATE_DIR/file"
+STARTFILE="$STATE_DIR/start"
+LOGFILE="$STATE_DIR/wf-recorder.log"
+OUTDIR="${CACHY_REC_DIR:-$HOME/Videos/ScreenRecords}"
+MODE="${1:-screen}"
+
+mkdir -p "$STATE_DIR" "$OUTDIR"
+
+# Serialize toggles so a fast double press cannot spawn two recorders.
+exec 9>"$STATE_DIR/lock"
+flock -w 3 9 || exit 0
+
+notify() {
+  notify-send -a "Screen Recorder" "$@" 2>/dev/null || true
+}
+
+recording_pid() {
+  local pid
+  [[ -r "$PIDFILE" ]] || return 1
+  read -r pid < "$PIDFILE" || return 1
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  printf '%s\n' "$pid"
+}
+
+stop_recording() {
+  local pid file
+  pid="$(recording_pid)" || return 0
+  file="$(cat "$FILEFILE" 2>/dev/null || true)"
+
+  # SIGINT makes wf-recorder flush and close the MP4 container cleanly.
+  kill -INT "$pid" 2>/dev/null || true
+  timeout 8 tail --pid="$pid" -f /dev/null >/dev/null 2>&1 || true
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+  fi
+
+  rm -f "$PIDFILE" "$FILEFILE" "$STARTFILE"
+  if [[ -n "$file" && -s "$file" ]]; then
+    notify "Recording saved" "$file"
+  else
+    notify "Recording stopped" "No file was written"
+  fi
+}
+
+start_recording() {
+  local file pid sink mon geom
+  local -a audio=() geometry=() output=() encode=() cmd=()
+
+  # Desktop audio: PipeWire/PulseAudio exposes the current output as
+  # "<sink>.monitor", so the recording follows whatever sink is active now.
+  case "${CACHY_REC_AUDIO:-desktop}" in
+    mic) audio=(-a) ;;
+    none | off) ;;
+    *)
+      sink="$(pactl get-default-sink 2>/dev/null || true)"
+      if [[ -n "$sink" ]] && pactl list short sources 2>/dev/null | awk '{ print $2 }' | grep -qxF "$sink.monitor"; then
+        audio=(-a"$sink.monitor")
+      fi
+      ;;
+  esac
+  # AAC is the most widely playable audio codec for MP4 (wf-recorder would
+  # otherwise pick Opus, which many players/editors refuse inside MP4).
+  if ((${#audio[@]})); then
+    audio+=(-C aac)
+  fi
+
+  case "$MODE" in
+    region)
+      if ! geom="$(slurp)"; then
+        exit 0
+      fi
+      if [[ -z "$geom" ]]; then
+        exit 0
+      fi
+      geometry=(-g "$geom")
+      ;;
+    screen | *)
+      mon="$(hyprctl monitors -j 2>/dev/null | jq -r 'first(.[] | select(.focused)) | .name // empty')"
+      if [[ -n "$mon" ]]; then
+        output=(-o "$mon")
+      fi
+      ;;
+  esac
+
+  # Hardware encoding keeps CPU load and battery use low on this Intel iGPU.
+  if [[ -e /dev/dri/renderD128 ]] &&
+    vainfo --display drm --device /dev/dri/renderD128 2>/dev/null |
+    grep -qE 'VAProfileHEVCMain[[:space:]]*:[[:space:]]*VAEntrypointEnc'; then
+    encode=(-c hevc_vaapi -d /dev/dri/renderD128 -p bitrate=12000000 -b 0)
+  else
+    encode=(-c libx264 -p preset=veryfast -p crf=20)
+  fi
+
+  file="$OUTDIR/recording-$(date +%Y%m%d-%H%M%S).mp4"
+  cmd=(wf-recorder "${output[@]}" "${geometry[@]}" -f "$file" -r 60 "${encode[@]}" "${audio[@]}")
+
+  : >"$LOGFILE"
+  # Detach so the keybind returns immediately and the recorder survives it.
+  # 9>&- is required: otherwise the recorder inherits our flock and every
+  # later toggle blocks until the recording ends.
+  nohup "${cmd[@]}" >"$LOGFILE" 2>&1 </dev/null 9>&- &
+  pid=$!
+  disown "$pid" 2>/dev/null || true
+
+  printf '%s\n' "$pid" >"$PIDFILE"
+  printf '%s\n' "$file" >"$FILEFILE"
+  date +%s >"$STARTFILE"
+
+  # wf-recorder exits immediately if the encoder or output is unusable.
+  sleep 0.7
+  if ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$PIDFILE" "$FILEFILE" "$STARTFILE"
+    notify "Recording failed" "$(tail -n 2 "$LOGFILE" | tr '\n' ' ')"
+    exit 1
+  fi
+
+  notify "Recording started" "Alt+Print again to stop · $file"
+}
+
+if recording_pid >/dev/null; then
+  stop_recording
+else
+  rm -f "$PIDFILE" "$FILEFILE" "$STARTFILE"
+  start_recording
+fi

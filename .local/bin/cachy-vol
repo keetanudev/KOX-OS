@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# cachy-vol: volume wrapper that suppresses Evision ghost media keys.
+# The physical p / \ keys emit a bogus VOLUMEDOWN/VOLUMEUP on event5 at the
+# same time as the real letter on event4. The knob emits only the event5
+# side. cachy-kb-watch timestamps event4 presses; if the matching letter
+# fired within the window, this is a ghost -> do nothing. Otherwise (knob
+# or dedicated media key) -> run wpctl. Fail-open: missing state = allow.
+set -u
+WINDOW="${CACHY_KB_GHOST_WINDOW:-0.25}"
+STATEDIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/cachy-kb-ghost"
+
+recent() { # $1 = state file name
+  local f="$STATEDIR/$1" now ts
+  [[ -r "$f" ]] || return 1
+  ts=$(cat "$f" 2>/dev/null) || return 1
+  now=$(python3 -c 'import time; print(time.monotonic())')
+  python3 -c "import sys; sys.exit(0 if ($now - $ts) < $WINDOW else 1)"
+}
+
+case "${1:-}" in
+  down|down1) recent p && exit 0 ;;
+  up|up1)     recent backslash && exit 0 ;;
+esac
+
+SINK="@DEFAULT_AUDIO_SINK@"
+case "${1:-}" in
+  up)    exec wpctl set-volume -l 1 "$SINK" 5%+ ;;
+  down)  exec wpctl set-volume "$SINK" 5%- ;;
+  up1)   exec wpctl set-volume -l 1 "$SINK" 1%+ ;;
+  down1) exec wpctl set-volume "$SINK" 1%- ;;
+  *) echo "usage: $0 {up|down|up1|down1}" >&2; exit 2 ;;
+esac

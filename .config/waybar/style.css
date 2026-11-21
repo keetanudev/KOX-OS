@@ -21,7 +21,7 @@ window#waybar > box {
     min-width: 0;
 }
 
-/* One centered row; the individual modules below form three visual groups. */
+/* Centered island; the notch stays put thanks to the ghost modules. */
 .modules-center {
     background: transparent;
     border: none;
@@ -156,4 +156,36 @@ window#waybar > box {
 #custom-battery:hover,
 #custom-power:hover {
     background-color: rgba(255, 255, 255, 0.07);
+}
+
+/* Invisible width mirrors. Same metrics as their real counterparts (same
+   selectors, so padding/borders still apply) with every color removed, so
+   they only hold space and keep the notch absolutely still. The battery
+   ghost carries the extra 10 px that balances the real wifi module's left
+   margin, putting the notch on the exact screen center. */
+#custom-bluetooth.ghost,
+#custom-bluetooth.ghost:hover,
+#custom-wifi.ghost,
+#custom-wifi.ghost:hover,
+#pulseaudio.ghost,
+#pulseaudio.ghost:hover,
+#custom-battery.ghost,
+#custom-battery.ghost:hover {
+    color: transparent;
+    background-color: transparent;
+    border-color: transparent;
+}
+
+#custom-battery.ghost {
+    margin-right: 1px;
+}
+
+#workspaces.ghost,
+#workspaces.ghost button,
+#workspaces.ghost button:hover,
+#workspaces.ghost button.active,
+#workspaces.ghost button.active:hover {
+    color: transparent;
+    background-color: transparent;
+    border-color: transparent;
 }

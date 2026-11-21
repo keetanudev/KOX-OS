@@ -1,0 +1,315 @@
+#!/usr/bin/env bash
+# kox-theme: KOX OS visual theme selector.
+# Ported from the rice's cachy-theme (picker/IPC identical). Full apply
+# cascade — a theme is accent + wallpaper + borders, everywhere:
+#   1. Waybar accent  — ~/.config/waybar/theme-accent.css (@define-color
+#                       accent_color, imported by style.css) + SIGUSR2 reload
+#   2. Fuzzel colors  — prompt/selection in [colors] of fuzzel.ini
+#                       (hex-scoped so the [main] prompt glyph never matches)
+#   3. Mako border    — border-color in mako/config + `makoctl reload`
+#   4. Kitty accent   — managed color block in kitty.conf (persists) + live
+#                       `kitty @ set-colors` over the kox-kitty socket
+#   5. Wallpaper swap — routed through kox-wallpaper --set (one owner of
+#                       the hyprpaper conf rewrite + daemon restart)
+#   6. Hyprland border— accent border (rrggbbaa) written to
+#                       ~/.config/kox/pickers/theme-border; looknfeel.lua
+#                       reads it with io.open on every (re)load
+#   7. GTK theme      — gsettings gtk-theme + color-scheme (live, dconf) and
+#                       gtk-theme-name + prefer-dark in gtk-3.0/4.0
+#                       settings.ini (persistent). If the theme is not
+#                       installed, the setting is still recorded (correct
+#                       the moment it is) and the notification says so.
+#
+# A theme = accent color + (for previews) a representative wallpaper.
+# Picker: fullscreen coverflow with per-theme preview cards (wallpaper with
+# a dim overlay + accent window frame, ffmpeg-composited) when quickshell is
+# installed, else fuzzel with the card as row icon.
+#
+# Preview backend: ffmpeg (see kox-wallpaper header — ImageMagick absent).
+# If ffmpeg is missing, cards degrade to the raw wallpaper / an empty card
+# (the QML still draws the accent rim, so a row is NEVER dropped or blank).
+#
+# Usage: kox-theme [--restore | <theme-name>]
+set -u
+
+STATE_DIR="$HOME/.config/kox/pickers"
+STATE="$STATE_DIR/theme"
+ACCENT_CSS="$HOME/.config/waybar/theme-accent.css"
+KITTY_CONF="$HOME/.config/kitty/kitty.conf"
+KITTY_SOCKET="unix:@kox-kitty"
+CACHE="$HOME/.cache/kox/pickers"
+COVERFLOW="$HOME/.local/bin/kox-pickers/kox-coverflow"
+HAVE_FFMPEG=0
+command -v ffmpeg >/dev/null 2>&1 && HAVE_FFMPEG=1
+
+mkdir -p "$STATE_DIR" "$CACHE"/themes
+
+# name|gtk-theme|border-rrggbbaa|accent-#hex|wallpaper|color-scheme
+# (the rice's table, extended with a per-theme color-scheme field:
+# prefer-dark / prefer-light for gsettings + the settings.ini dark flag).
+# border is Hyprland's rgba(rrggbbaa) hex form (alpha LAST, e.g. 33ccffee);
+# looknfeel.lua wraps it verbatim. The wallpaper feeds step 5 + previews.
+THEMES=(
+  "cachy-dark|adw-gtk3-dark|7dcfffee|#7dcfff|$HOME/Pictures/Wallpapers/dark-boreal-eclipse-castle.jpg|prefer-dark"
+  "dracula|adw-gtk3-dark|bd93f9ee|#bd93f9|$HOME/Pictures/Wallpapers/dark-synthwave-city.jpg|prefer-dark"
+  "emerald|adw-gtk3-dark|50fa7bee|#50fa7b|$HOME/Pictures/Wallpapers/dark-journey-to-the-west.jpg|prefer-dark"
+  "arctic-light|adw-gtk3|3584e4ee|#3584e4|$HOME/Pictures/Wallpapers/light-lofoten-fjord.jpg|prefer-light"
+  "ant-dracula|Ant-Dracula|ff79c6ee|#ff79c6|$HOME/Pictures/Wallpapers/dark-the-batman-red-rain.jpg|prefer-dark"
+  "nordic|Nordic|88c0d0ee|#88c0d0|$HOME/Pictures/Wallpapers/dark-batman-noir.jpg|prefer-dark"
+  "orchis|Orchis-dark|ffb86cee|#ffb86c|$HOME/Pictures/Wallpapers/dark-sunset-voyage.jpg|prefer-dark"
+  "materia|Materia-dark|2ec4b6ee|#2ec4b6|$HOME/Pictures/Wallpapers/dark-cathedral-queen.jpg|prefer-dark"
+  "catppuccin|catppuccin-mocha-mauve|cba6f7ee|#cba6f7|$HOME/Pictures/Wallpapers/dark-crimson-city-night.jpg|prefer-dark"
+  "tokyonight|Tokyonight-Dark|7aa2f7ee|#7aa2f7|$HOME/Pictures/Wallpapers/light-painted-sf-dusk.jpg|prefer-dark"
+  "everforest|Everforest-Dark|a7c080ee|#a7c080|$HOME/Pictures/Wallpapers/light-manarola-dusk.jpg|prefer-dark"
+)
+
+notify() { notify-send "Theme" "$1" 2>/dev/null || true; }
+
+# hex2hls bucket for the picker's color dots (stdlib python, same HLS
+# thresholds as the rice's cachy-color-bucket; no ffmpeg needed — the accent
+# hex is the source).
+bucket_hex() {
+  python3 - "$1" <<'EOF'
+import colorsys, sys
+h = sys.argv[1].lstrip('#')
+try:
+    r, g, b = (int(h[i:i+2], 16) / 255.0 for i in (0, 2, 4))
+except (ValueError, IndexError):
+    print("gray"); sys.exit(0)
+hh, ll, ss = colorsys.rgb_to_hls(r, g, b)
+deg = hh * 360.0
+if ss < 0.16 or ll < 0.12:
+    print("gray")
+elif deg < 12 or deg >= 345:
+    print("red")
+elif deg < 40:
+    print("orange")
+elif deg < 68:
+    print("yellow")
+elif deg < 168:
+    print("green")
+elif deg < 258:
+    print("blue")
+elif deg < 292:
+    print("purple")
+else:
+    print("pink")
+EOF
+}
+
+# Preview card: theme wallpaper → 480x300 crop, dim, dark "window", accent
+# frame + accent titlebar. Missing wallpaper → accent swatch on the rice's
+# dark base. ffmpeg failure → empty image (row still renders with accent rim).
+card() { # $1=name $2=wallpaper $3=accent
+  local name="$1" wall="$2" accent="$3"
+  local acc="${accent#\#}"
+  local dst="$CACHE/themes/${name}.png"
+  if (( ! HAVE_FFMPEG )); then
+    [[ -r "$wall" ]] && { printf '%s\n' "$wall"; return 0; }
+    printf '%s\n' ""; return 0
+  fi
+  if [[ -r "$wall" ]]; then
+    [[ -f "$dst" && "$dst" -nt "$wall" ]] && { printf '%s\n' "$dst"; return 0; }
+    ffmpeg -y -loglevel error -i "$wall" -vf \
+      "scale=480:300:force_original_aspect_ratio=increase,crop=480:300,drawbox=t=fill:color=black@0.35,drawbox=x=100:y=60:w=280:h=180:t=fill:color=0x0A0A0E@0.92,drawbox=x=100:y=60:w=280:h=180:t=3:color=0x${acc},drawbox=x=100:y=60:w=280:h=24:t=fill:color=0x${acc}" \
+      -frames:v 1 "$dst" 2>/dev/null \
+      && { printf '%s\n' "$dst"; return 0; }
+    # ffmpeg could not composite (codec?): degrade to the raw wallpaper.
+    printf '%s\n' "$wall"; return 0
+  fi
+  ffmpeg -y -loglevel error -f lavfi -i "color=c=0x1C1E27:s=480x300" -vf \
+    "drawbox=x=100:y=60:w=280:h=180:t=3:color=0x${acc},drawbox=x=100:y=60:w=280:h=24:t=fill:color=0x${acc}" \
+    -frames:v 1 "$dst" 2>/dev/null \
+    && { printf '%s\n' "$dst"; return 0; }
+  printf '%s\n' ""
+}
+
+spec_field() { # $1=spec $2=field-index(1-6)
+  local IFS='|'
+  read -r f1 f2 f3 f4 f5 f6 <<< "$1"
+  case "$2" in 1) printf '%s\n' "$f1";; 2) printf '%s\n' "$f2";;
+               3) printf '%s\n' "$f3";; 4) printf '%s\n' "$f4";;
+               5) printf '%s\n' "$f5";; 6) printf '%s\n' "$f6";; esac
+}
+
+# gtk_theme_installed <name> — is the theme on disk anywhere GTK looks?
+gtk_theme_installed() {
+  local d
+  for d in "$HOME/.themes" "$HOME/.local/share/themes" /usr/share/themes; do
+    [[ -d "$d/$1" ]] && return 0
+  done
+  return 1
+}
+
+# ini_set <file> <key> <value> — upsert `key=value` under [Settings],
+# preserving every other key (GTK settings.ini format: no spaces around =).
+# Creates the file with a [Settings] header when missing.
+ini_set() {
+  local file="$1" key="$2" val="$3"
+  if [[ ! -f "$file" ]]; then
+    mkdir -p "$(dirname "$file")"
+    printf '[Settings]\n' > "$file"
+  fi
+  if grep -qE "^${key}=" "$file"; then
+    sed -i -E "s|^${key}=.*|${key}=${val}|" "$file"
+  else
+    sed -i "/^\[Settings\]/a ${key}=${val}" "$file"
+  fi
+}
+
+apply_spec() { # $1 = spec line
+  local name gtk border accent wall scheme
+  name="$(spec_field "$1" 1)"; gtk="$(spec_field "$1" 2)"
+  border="$(spec_field "$1" 3)"; accent="$(spec_field "$1" 4)"
+  wall="$(spec_field "$1" 5)"; scheme="$(spec_field "$1" 6)"
+
+  # 1. Waybar accent (style.css imports theme-accent.css and reads
+  #    @accent_color), then hot-reload the bar's stylesheet.
+  printf '@define-color accent_color %s;\n' "$accent" > "$ACCENT_CSS"
+  pkill -USR2 -x waybar 2>/dev/null || true
+
+  # 2. Fuzzel: prompt + selection catch the accent at next launch.
+  #    Strictly hex-scoped; the [main] prompt glyph can never match.
+  local acc="${accent#\#}"
+  [[ -f "$HOME/.config/fuzzel/fuzzel.ini" ]] && sed -i -E \
+    -e "s/^prompt[[:space:]]*=[[:space:]]*[0-9a-fA-F]{6,8}$/prompt=${acc}ff/" \
+    -e "s/^selection[[:space:]]*=[[:space:]]*[0-9a-fA-F]{6,8}$/selection=${acc}d9/" \
+    "$HOME/.config/fuzzel/fuzzel.ini"
+
+  # 3. Mako: accent-tinted border, hot reload via makoctl (SIGUSR1 fallback).
+  if [[ -f "$HOME/.config/mako/config" ]]; then
+    sed -i -E "s|^border-color=.*|border-color=$accent|" "$HOME/.config/mako/config"
+    if command -v makoctl >/dev/null 2>&1; then
+      makoctl reload >/dev/null 2>&1 || true
+    elif pgrep -x mako >/dev/null 2>&1; then
+      pkill -USR1 -x mako 2>/dev/null || true
+    fi
+  fi
+
+  # 4. Kitty: persist a managed accent block, then live-apply over the
+  #    kox-kitty remote socket (non-fatal if kitty is not running).
+  local block
+  block="$(printf '# BEGIN KOX theme (managed by kox-theme — do not edit by hand)\ncursor %s\nurl_color %s\nactive_border_color %s\n# END KOX theme\n' "$accent" "$accent" "$accent")"
+  if [[ -f "$KITTY_CONF" ]]; then
+    sed -i '/^# BEGIN KOX theme/,/^# END KOX theme/d' "$KITTY_CONF"
+  fi
+  printf '%s\n' "$block" >> "$KITTY_CONF"
+  if pgrep -x kitty >/dev/null 2>&1; then
+    local tmp; tmp="$(mktemp /tmp/kox-kitty-colors.XXXXXX)"
+    printf 'cursor %s\nurl_color %s\nactive_border_color %s\n' "$accent" "$accent" "$accent" > "$tmp"
+    kitty @ --to "$KITTY_SOCKET" set-colors --all "$tmp" >/dev/null 2>&1 || true
+    rm -f "$tmp"
+  fi
+
+  # 5. Wallpaper swap (the rice's theme = accent + wallpaper). Routed
+  #    through kox-wallpaper --set so the hyprpaper apply path (conf
+  #    rewrite + daemon restart + state file) stays owned by one script.
+  if [[ -r "$wall" ]]; then
+    "$HOME/.local/bin/kox-pickers/kox-wallpaper" --set "$wall" >/dev/null 2>&1 || true
+  fi
+
+  # 6. Hyprland border: persist the accent border (rrggbbaa — Hyprland's
+  #    rgba(rrggbbaa) hex form, alpha last) for looknfeel.lua, which reads
+  #    this file with io.open on every config (re)load, and live-apply via
+  #    `hyprctl eval` + a partial hl.config merge (per-key merge verified:
+  #    gaps/border_size/layout survive). This build has no `hyprctl keyword`
+  #    ("unknown request"); eval is its dynamic-config surface. If eval is
+  #    ever unavailable, the written file still applies on the next reload.
+  printf '%s\n' "$border" > "$STATE_DIR/theme-border"
+  command -v hyprctl >/dev/null 2>&1 \
+    && hyprctl eval "hl.config({ general = { col = { active_border = 'rgba($border)' } } })" \
+       >/dev/null 2>&1 || true
+
+  # 7. GTK: live value via gsettings (dconf), persistent value via the
+  #    gtk-3.0/4.0 settings.ini pair (xsettings-less sessions read these).
+  #    prefer-dark flips gtk-application-prefer-dark-theme to match the
+  #    theme's scheme. A not-installed theme is still recorded (the setting
+  #    becomes correct the moment it is installed) — the final notification
+  #    reports it honestly instead of pretending it applied.
+  if command -v gsettings >/dev/null 2>&1; then
+    gsettings set org.gnome.desktop.interface gtk-theme "$gtk" >/dev/null 2>&1 || true
+    gsettings set org.gnome.desktop.interface color-scheme "$scheme" >/dev/null 2>&1 || true
+  fi
+  local darkflag=0; [[ "$scheme" == "prefer-dark" ]] && darkflag=1
+  ini_set "$HOME/.config/gtk-3.0/settings.ini" gtk-theme-name "$gtk"
+  ini_set "$HOME/.config/gtk-3.0/settings.ini" gtk-application-prefer-dark-theme "$darkflag"
+  ini_set "$HOME/.config/gtk-4.0/settings.ini" gtk-theme-name "$gtk"
+  ini_set "$HOME/.config/gtk-4.0/settings.ini" gtk-application-prefer-dark-theme "$darkflag"
+
+  printf '%s\n' "$name" > "$STATE"
+  if gtk_theme_installed "$gtk"; then
+    notify "$name applied"
+  else
+    notify "$name applied (GTK theme '$gtk' not installed — install it for full GTK theming)"
+  fi
+}
+
+if [[ "${1:-}" == "--restore" ]]; then
+  # Nothing needed at login: every consumer reads a file that already
+  # carries the choice (accent css, fuzzel.ini, mako/config, kitty.conf,
+  # theme-border via looknfeel.lua, gtk settings.ini). Kept as a hook.
+  exit 0
+fi
+
+if [[ $# -ge 1 ]]; then
+  for spec in "${THEMES[@]}"; do
+    if [[ "$(spec_field "$spec" 1)" == "$1" ]]; then
+      apply_spec "$spec"
+      exit 0
+    fi
+  done
+  notify "Unknown theme: $1"
+  exit 1
+fi
+
+CURRENT="$(cat "$STATE" 2>/dev/null || echo cachy-dark)"
+
+# Parallel arrays: NAMES (spec order) + IMAGES (preview card per theme) +
+# BUCKETS (accent-derived filter dots) + ACCENTS (per-card rim color).
+NAMES=(); IMAGES=(); BUCKETS=(); ACCENTS=()
+for spec in "${THEMES[@]}"; do
+  name="$(spec_field "$spec" 1)"
+  accent="$(spec_field "$spec" 4)"
+  wall="$(spec_field "$spec" 5)"
+  NAMES+=("$name")
+  IMAGES+=("$(card "$name" "$wall" "$accent")")
+  BUCKETS+=("$(bucket_hex "$accent")")
+  ACCENTS+=("$accent")
+done
+
+INIT=0
+for i in "${!NAMES[@]}"; do [[ "${NAMES[$i]}" == "$CURRENT" ]] && { INIT=$i; break; }; done
+
+if command -v quickshell >/dev/null 2>&1; then
+  JSON="$(for i in "${!NAMES[@]}"; do
+    printf '%s\t%s\t%s\t%s\n' "${NAMES[$i]}" "${IMAGES[$i]}" "${BUCKETS[$i]}" "${ACCENTS[$i]}"
+  done |
+    python3 -c 'import sys,json; print(json.dumps([{"label":l,"image":p,"bucket":b,"accent":a} for l,p,b,a in (ln.rstrip("\n").split("\t") for ln in sys.stdin)]))')"
+  if IDX="$("$COVERFLOW" 'Theme' "$INIT" "$JSON")"; then
+    [[ "$IDX" =~ ^[0-9]+$ ]] && (( IDX < ${#NAMES[@]} )) && {
+      for spec in "${THEMES[@]}"; do
+        [[ "$(spec_field "$spec" 1)" == "${NAMES[$IDX]}" ]] && { apply_spec "$spec"; exit 0; }
+      done
+      exit 0
+    }
+  else
+    CF_STATUS=$?
+    (( CF_STATUS == 2 )) && exit 0
+  fi
+  # Quickshell installed but the QML run failed: fall through to fuzzel.
+fi
+
+# Fallback: fuzzel with the preview card as the row icon.
+CHOICE="$(for i in "${!NAMES[@]}"; do
+  if [[ "${NAMES[$i]}" == "$CURRENT" ]]; then
+    printf '* %s (active)\t%s\n' "${NAMES[$i]}" "${IMAGES[$i]}"
+  else
+    printf '%s\t%s\n' "${NAMES[$i]}" "${IMAGES[$i]}"
+  fi
+done | python3 -c 'import sys; [sys.stdout.buffer.write((p[0] + "\0icon\x1f" + p[1] + "\n").encode()) for ln in sys.stdin for p in [ln.rstrip("\n").split("\t")]]' |
+  fuzzel --dmenu --prompt 'Theme: ')" || exit 0
+NAME="$(printf '%s' "$CHOICE" | sed -E 's/^(\* |  )//; s/ \(active\)$//')"
+[[ -z "$NAME" ]] && exit 0
+for spec in "${THEMES[@]}"; do
+  [[ "$(spec_field "$spec" 1)" == "$NAME" ]] && { apply_spec "$spec"; exit 0; }
+done

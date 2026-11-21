@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# kox-bar: KOX OS bar-style selector — STUB.
+#
+# Same architecture as the other kox pickers (coverflow + fuzzel fallback),
+# pointed at the KOX styles directory. The apply side is intentionally not
+# implemented yet: selecting a style records the choice only.
+#
+# Style contract (inherited from the rice's cachy-bar):
+#   ~/.local/share/kox/bar-styles/<name>/config.template       Waybar JSONC
+#   ~/.local/share/kox/bar-styles/<name>/style.template.css    stylesheet
+#   ~/.local/share/kox/bar-styles/<name>/preview (optional)    mockup hints
+#
+# TODO (next milestone): template rendering (__BAR_HEIGHT__ substitution,
+# kox-scale ownership of sizes) + waybar hot reload (SIGUSR2 — plain
+# process, per Agents.md; the rice's systemd unit must NOT be ported).
+#
+# Usage: kox-bar [--restore | <style-name>]
+set -u
+
+STATE_DIR="$HOME/.config/kox/pickers"
+STATE="$STATE_DIR/bar-style"
+STYLES_DIR="$HOME/.local/share/kox/bar-styles"
+COVERFLOW="$HOME/.local/bin/kox-pickers/kox-coverflow"
+mkdir -p "$STATE_DIR" "$STYLES_DIR"
+
+notify() { notify-send "Bar" "$1" 2>/dev/null || true; }
+
+list_styles() {
+  local dir name
+  for dir in "$STYLES_DIR"/*/; do
+    [[ -d "$dir" ]] || continue
+    name="${dir%/}"; name="${name##*/}"
+    # A style is only listed once it can actually be applied later.
+    [[ -f "$dir/config.template" && -f "$dir/style.template.css" ]] && printf '%s\n' "$name"
+  done
+}
+
+apply() { # stub: record the choice, no rendering yet
+  printf '%s\n' "$1" > "$STATE"
+  notify "$1 recorded (apply pipeline not implemented yet — stub)"
+}
+
+if [[ "${1:-}" == "--restore" ]]; then
+  exit 0
+fi
+
+if [[ $# -ge 1 ]]; then
+  apply "$1"
+  exit 0
+fi
+
+CURRENT="$(cat "$STATE" 2>/dev/null)"
+NAMES=()
+while IFS= read -r name; do NAMES+=("$name"); done < <(list_styles)
+[[ ${#NAMES[@]} -eq 0 ]] && { notify "No bar styles in $STYLES_DIR (stub)"; exit 1; }
+
+INIT=0
+for i in "${!NAMES[@]}"; do [[ "${NAMES[$i]}" == "$CURRENT" ]] && { INIT=$i; break; }; done
+
+if command -v quickshell >/dev/null 2>&1; then
+  JSON="$(python3 -c 'import sys,json; print(json.dumps([{"label":n,"image":""} for n in sys.stdin.read().split()]))' <<< "${NAMES[*]}")"
+  if IDX="$(KOX_CF_COLORFILTER=0 "$COVERFLOW" 'Bar' "$INIT" "$JSON")"; then
+    [[ "$IDX" =~ ^[0-9]+$ ]] && (( IDX < ${#NAMES[@]} )) && { apply "${NAMES[$IDX]}"; exit 0; }
+  else
+    CF_STATUS=$?
+    (( CF_STATUS == 2 )) && exit 0
+  fi
+fi
+
+# Fallback: plain fuzzel (no cards in the stub — mockup rendering arrives
+# with the real apply pipeline).
+CHOICE="$(printf '%s\n' "${NAMES[@]}" | fuzzel --dmenu --prompt 'Bar: ')" || exit 0
+[[ -z "$CHOICE" ]] && exit 0
+apply "$CHOICE"

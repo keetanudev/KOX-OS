@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# cachy-nautilus-cwd: open Nautilus in the focused terminal's cwd
+# (Omarchy Super+Shift+Alt+F equivalent). Supports kitty and alacritty.
+# Falls back to $HOME when cwd cannot be determined reliably.
+set -euo pipefail
+DIR="$HOME"
+
+if command -v hyprctl >/dev/null 2>&1; then
+  CLASS="$(hyprctl activewindow -j 2>/dev/null | grep -o '"class": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+  PID="$(hyprctl activewindow -j 2>/dev/null | grep -o '"pid": *[0-9]*' | head -1 | grep -o '[0-9]*' || true)"
+  if [[ "$CLASS" == "kitty" || "$CLASS" == "Alacritty" ]] && [[ -n "${PID:-}" ]]; then
+    # Newest child process of the terminal is usually the shell;
+    # its cwd is the terminal's current directory.
+    CHILD="$(pgrep -P "$PID" 2>/dev/null | tail -1 || true)"
+    for p in ${CHILD:-} $PID; do
+      if [[ -L "/proc/$p/cwd" ]]; then
+        CAND="$(readlink "/proc/$p/cwd")"
+        [[ -d "$CAND" ]] && DIR="$CAND" && break
+      fi
+    done
+  fi
+fi
+
+exec nautilus --new-window "$DIR"

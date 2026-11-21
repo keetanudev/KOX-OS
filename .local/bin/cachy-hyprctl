@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# cachy-hyprctl: hyprctl wrapper for processes that do NOT inherit Hyprland's
+# session environment.
+#
+# Why this exists: Waybar can be started before Hyprland finishes exporting
+# its session environment, and launchers do not always inherit the compositor
+# environment. In that case HYPRLAND_INSTANCE_SIGNATURE is EMPTY inside
+# Waybar. hyprctl needs it to find the compositor, so every OnClick running
+# hyprctl fails with
+#   HYPRLAND_INSTANCE_SIGNATURE was not set! (Is Hyprland running?)
+# and the bar button looks completely dead. Nothing is printed to the bar.
+#
+# Use this instead of bare `hyprctl` in any waybar on-click / custom module.
+#
+# Resolution order (fastest first, no subprocess on the common path):
+#   1. HYPRLAND_INSTANCE_SIGNATURE already set and non-empty -> use it
+#   2. the instance socket dir under $XDG_RUNTIME_DIR/hypr/  (pure shell glob)
+#   3. `hyprctl instances -j`                           (last resort)
+set -uo pipefail
+
+sig="${HYPRLAND_INSTANCE_SIGNATURE:-}"
+
+if [[ -z "$sig" ]]; then
+  runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  for sock in "$runtime"/hypr/*/.socket.sock; do
+    [[ -S "$sock" ]] || continue
+    sig="${sock%/.socket.sock}"
+    sig="${sig##*/}"
+    break
+  done
+fi
+
+if [[ -z "$sig" ]]; then
+  sig="$(hyprctl instances -j 2>/dev/null | python3 -c \
+    'import json,sys;d=json.load(sys.stdin);print(d[0].get("instance","") if d else "")' \
+    2>/dev/null || true)"
+fi
+
+if [[ -z "$sig" ]]; then
+  echo "cachy-hyprctl: no running Hyprland instance found" >&2
+  exit 1
+fi
+
+export HYPRLAND_INSTANCE_SIGNATURE="$sig"
+exec hyprctl "$@"

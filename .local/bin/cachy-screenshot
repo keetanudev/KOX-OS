@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# cachy-screenshot: grim + slurp screenshots (Omarchy Print workflow equivalent).
+# Usage: cachy-screenshot [region|window|fullscreen]
+# Saves to ~/Pictures/Screenshots, copies to clipboard, notifies via mako.
+set -euo pipefail
+MODE="${1:-region}"
+DIR="$HOME/Pictures/Screenshots"
+mkdir -p "$DIR"
+FILE="$DIR/screenshot-$(date +%Y%m%d-%H%M%S).png"
+
+case "$MODE" in
+  fullscreen)
+    grim "$FILE"
+    ;;
+  window)
+    # slurp click on a window region; user clicks the desired window
+    grim -g "$(slurp)" "$FILE"
+    ;;
+  region|*)
+    grim -g "$(slurp)" "$FILE"
+    ;;
+esac
+
+wl-copy < "$FILE" 2>/dev/null || true
+notify-send "Screenshot saved" "$FILE" -i "$FILE" 2>/dev/null || true
+echo "$FILE"

@@ -188,14 +188,20 @@ safe_bind(mainMod .. " + SHIFT + comma", hl.dsp.exec_cmd("makoctl dismiss -a"))
 safe_bind(mainMod .. " + CTRL + comma", hl.dsp.exec_cmd("makoctl mode -t do-not-disturb"))
 -- Approx: SIGUSR1 toggles waybar (Omarchy toggles its own bar the same way)
 safe_bind(mainMod .. " + SHIFT + Space", hl.dsp.exec_cmd("sh -c 'pgrep -x waybar >/dev/null && pkill -USR1 waybar || waybar'"))
--- Omarchy-style pickers: wallpaper (Super+Ctrl+Space) and theme (Super+Ctrl+Shift+Space)
-safe_bind(mainMod .. " + CTRL + Space", hl.dsp.exec_cmd("cachy-wallpaper"))
-safe_bind(mainMod .. " + CTRL + SHIFT + Space", hl.dsp.exec_cmd("cachy-theme"))
--- Cursor selector (extra beyond Omarchy parity)
-safe_bind(mainMod .. " + CTRL + SHIFT + C", hl.dsp.exec_cmd("cachy-cursor"))
+-- Omarchy-style pickers: wallpaper (Super+Ctrl+Space) and theme (Super+Ctrl+Shift+Space).
+-- 2026-11-15: repointed to the kox-pickers family. The old cachy-* pickers
+-- cannot run on this machine: their previews needed ImageMagick (absent) and
+-- their coverflow.qml (never installed here) needed qt6-5compat, so they
+-- always degraded to fuzzel with "Preview failed" spam.
+safe_bind(mainMod .. " + CTRL + Space", hl.dsp.exec_cmd("kox wallpaper"))
+safe_bind(mainMod .. " + CTRL + SHIFT + Space", hl.dsp.exec_cmd("kox theme"))
+-- Cursor selector (extra beyond Omarchy parity): kox-cursor (fuzzel dmenu;
+-- the old cachy-cursor could not run here — its ImageMagick previews are
+-- impossible on this machine).
+safe_bind(mainMod .. " + CTRL + SHIFT + C", hl.dsp.exec_cmd("kox cursor"))
 -- Bar style selector (extra beyond Omarchy parity): switches the Waybar
--- layout/look between the styles in ~/.config/waybar/styles.
-safe_bind(mainMod .. " + CTRL + SHIFT + B", hl.dsp.exec_cmd("cachy-bar"))
+-- layout/look; styles live in ~/.local/share/kox/bar-styles (stub for now).
+safe_bind(mainMod .. " + CTRL + SHIFT + B", hl.dsp.exec_cmd("kox bar"))
 -- Lock the session with the KOX lockscreen (quickshell): WlSessionLock +
 -- PAM clock/password UI in ~/.config/quickshell/lock.qml, spawned on
 -- demand by kox-lock (no resident daemon). kox-lock falls back to the
@@ -221,5 +227,9 @@ end
 -- KOX OS additions beyond the rice set (non-conflicting):
 --   Super+D: second launcher bind (cachy-launcher is `exec fuzzel`)
 safe_bind(mainMod .. " + D", hl.dsp.exec_cmd("cachy-launcher"))
+--   Super+Shift+T / Super+Shift+W: KOX visual pickers (theme / wallpaper)
+--   via the new kox-pickers family (Quickshell coverflow + fuzzel fallback)
+safe_bind(mainMod .. " + SHIFT + T", hl.dsp.exec_cmd("kox theme"))
+safe_bind(mainMod .. " + SHIFT + W", hl.dsp.exec_cmd("kox wallpaper"))
 --   Super+M: exit the compositor
 safe_bind(mainMod .. " + M", hl.dsp.exit())

@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# kox-coverflow: KOX OS fullscreen coverflow picker.
+# Ported 1:1 from the rice's cachy-coverflow (proven architecture).
+#
+# Usage: kox-coverflow <title> <initial-index> <json>
+#   json = [{"label": "...", "image": "/path/preview.png"}, ...]
+# Prints the selected INDEX on stdout; exit 2 on cancel/Esc, exit 1 when
+# Quickshell is missing or fails (callers fall back to fuzzel-with-icons).
+#
+# IPC contract (unchanged from the old picker):
+#   IN  env:  KOX_CF_JSON / KOX_CF_OUT / KOX_CF_TITLE / KOX_CF_INITIAL
+#             (+ optional KOX_CF_COLORFILTER / KOX_CF_ACCENT / KOX_CF_TEST*)
+#   OUT file: selected index written to $KOX_CF_OUT, "-1" on cancel,
+#             then the QML quits itself (150 ms grace timer).
+set -u
+
+TITLE="${1:-Select}"
+INITIAL="${2:-0}"
+JSON="${3:-[]}"
+
+command -v quickshell >/dev/null 2>&1 || exit 1
+QML="$HOME/.config/kox-pickers/kox-coverflow.qml"
+[[ -r "$QML" ]] || exit 1
+
+OUT="/tmp/kox-cf-$$-$RANDOM.out"
+rm -f "$OUT"
+KOX_CF_JSON="$JSON" KOX_CF_OUT="$OUT" KOX_CF_TITLE="$TITLE" \
+  KOX_CF_INITIAL="$INITIAL" \
+  quickshell -p "$QML" >/dev/null 2>&1
+if [[ -f "$OUT" ]]; then
+  RESULT="$(cat "$OUT")"
+  rm -f "$OUT"
+  if [[ "$RESULT" == "-1" ]]; then
+    exit 2
+  elif [[ "$RESULT" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$RESULT"
+    exit 0
+  fi
+fi
+rm -f "$OUT"
+exit 1

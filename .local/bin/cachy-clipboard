@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# cachy-clipboard: cliphist + fuzzel clipboard history (Omarchy Super+Ctrl+V equivalent).
+# Requires cliphist watcher running (started from hypr autostart).
+set -euo pipefail
+SEL="$(cliphist list | fuzzel --dmenu --prompt 'Clipboard: ')" || exit 0
+[[ -n "$SEL" ]] && echo "$SEL" | cliphist decode | wl-copy
