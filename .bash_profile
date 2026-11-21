@@ -18,7 +18,11 @@ export PATH="/home/artix/.local/bin:$PATH"
 if [[ "$(tty)" == "/dev/tty1" ]] \
    && [[ -z "$WAYLAND_DISPLAY" && -z "$DISPLAY" ]] \
    && [[ -z "$KOX_NO_SESSION" ]] \
-   && command -v Hyprland >/dev/null 2>&1
+   && command -v start-hyprland >/dev/null 2>&1
 then
-    exec Hyprland
+    # KOX OS: launch via the proper watchdog launcher. Launching `Hyprland`
+    # directly makes Hyprland print "launched without start-hyprand" on
+    # every boot; start-hyprland is the supported way in (verified: starts
+    # cleanly, no warning).
+    exec start-hyprland
 fi
