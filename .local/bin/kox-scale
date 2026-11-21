@@ -308,11 +308,36 @@ restart_waybar() {
     sig=$(ls "$runtime/hypr" 2>/dev/null | head -n 1)
     [[ -n "$sig" ]] && export HYPRLAND_INSTANCE_SIGNATURE="$sig"
     export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$runtime/bus}"
-    pkill -x waybar 2>/dev/null || true
-    sleep 0.25
-    ( setsid waybar >/tmp/kox-waybar.log 2>&1 < /dev/null & )
-    sleep 0.35
-    pgrep -x waybar >/dev/null 2>&1
+
+    # Same lock as kox-waybar-autostart. At boot the guard is still watching
+    # the bar it just spawned; killing that bar here made the guard read the
+    # deliberate kill as a crash and respawn it, leaving two bars. Wait for
+    # the guard's watch to finish, then restart under the lock.
+    (
+        flock -w 5 8 || true
+        printf '[%s] scale: restarting waybar (height change)\n' \
+            "$(date '+%F %T.%3N')" >>/tmp/kox-waybar.log
+        pkill -x waybar 2>/dev/null || true
+        # A fixed sleep raced a slow exit; wait for the process to be gone.
+        local _i
+        for _i in $(seq 1 20); do
+            pgrep -x waybar >/dev/null 2>&1 || break
+            sleep 0.1
+        done
+        ( setsid waybar >>/tmp/kox-waybar.log 2>&1 < /dev/null 8>&- & )
+        sleep 0.35
+        # Never leave two bars behind; keep the newest (just spawned) one.
+        local -a live
+        mapfile -t live < <(pgrep -x waybar 2>/dev/null || true)
+        if (( ${#live[@]} > 1 )); then
+            local keep pid
+            keep=$(printf '%s\n' "${live[@]}" | sort -n | tail -1)
+            for pid in "${live[@]}"; do
+                [[ "$pid" == "$keep" ]] || kill "$pid" 2>/dev/null || true
+            done
+        fi
+        pgrep -x waybar >/dev/null 2>&1
+    ) 8>"/tmp/kox-waybar.lock"
 }
 
 print_current() {

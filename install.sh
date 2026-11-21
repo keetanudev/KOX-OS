@@ -574,6 +574,25 @@ setup_services() {
     ensure_system_service "Bluetooth" bluetoothd bluetooth
     ensure_system_service "Power Profiles Daemon" power-profiles-daemon
 
+    # Artix's live environment ships connman. Left enabled it races
+    # NetworkManager for wlan0/eth0, and the Waybar Wi-Fi widget (nmcli)
+    # then sees no usable interface. NetworkManager is the supported stack.
+    if [[ -e /etc/runlevels/default/connmand ]]; then
+        info "Disabling connmand (NetworkManager owns the network stack) ..."
+        sudo rc-update del connmand default >/dev/null 2>&1 || true
+        sudo rc-service connmand stop >/dev/null 2>&1 || true
+        ok "connmand disabled."
+    fi
+
+    # BlueZ powers adapters on at boot only when AutoEnable is true; the
+    # packaged file ships it commented. Make it explicit so the Bluetooth
+    # widget is not stuck on "off" after a fresh install.
+    if [[ -f /etc/bluetooth/main.conf ]] &&
+        ! grep -qE '^[[:space:]]*AutoEnable=true' /etc/bluetooth/main.conf; then
+        sudo sed -i 's/^#AutoEnable=true/AutoEnable=true/' /etc/bluetooth/main.conf
+        ok "BlueZ AutoEnable=true."
+    fi
+
     step "Enabling PipeWire user services"
 
     export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"

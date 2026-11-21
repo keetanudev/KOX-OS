@@ -36,8 +36,30 @@ elapsed() {  # seconds since $1 (EPOCHREALTIME), 2 decimals
     awk -v a="$1" -v b="${EPOCHREALTIME:-$1}" 'BEGIN { printf "%.2f", b - a }'
 }
 
+# Serialize with kox-scale's restart leg (same lock path). On a fresh
+# install the boot-time scale apply changes the bar height and restarts
+# Waybar; if that kill lands while this guard is still watching, the guard
+# reads the deliberate kill as a crash and respawns -> two bars on screen.
+exec 9>"/tmp/kox-waybar.lock"
+if ! flock -n 9; then
+    log "another bar guard holds the lock - exits 0"
+    exit 0
+fi
+
 t0=${EPOCHREALTIME:-}
 log "start (pid $$, bin=$WAYBAR_BIN)"
+
+# A previous race may have left duplicates; collapse them before the
+# "already running" check so every session converges to exactly one bar.
+mapfile -t bars < <(pgrep -x waybar 2>/dev/null || true)
+if (( ${#bars[@]} > 1 )); then
+    log "found ${#bars[@]} waybar instances - collapsing to one"
+    kill "${bars[@]}" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+        pgrep -x waybar >/dev/null 2>&1 || break
+        sleep 0.1
+    done
+fi
 
 # Bar already up (fast session start beat this guard)? One bar only.
 if pgrep -x waybar >/dev/null 2>&1; then
@@ -72,7 +94,7 @@ fi
 #   - alive for the whole $DEADLINE: success, guard exits 0
 spawn_and_watch() {
     local attempt=$1
-    ( setsid "$WAYBAR_BIN" $WAYBAR_ARGS >>"$LOG" 2>&1 </dev/null & )
+    ( setsid "$WAYBAR_BIN" $WAYBAR_ARGS >>"$LOG" 2>&1 </dev/null 9>&- & )
     log "attempt $attempt: spawned"
     local tick seen_up=0 misses=0
     for tick in $(seq 1 $((DEADLINE * 10))); do
@@ -89,6 +111,19 @@ spawn_and_watch() {
         fi
     done
     if (( seen_up )); then
+        # Final safety net: if a concurrent path (scale restart, manual
+        # spawn) raced us, keep exactly one bar — the newest process, which
+        # is the one that loaded the current config.
+        local -a live
+        mapfile -t live < <(pgrep -x waybar 2>/dev/null || true)
+        if (( ${#live[@]} > 1 )); then
+            local keep pid
+            keep=$(printf '%s\n' "${live[@]}" | sort -n | tail -1)
+            for pid in "${live[@]}"; do
+                [[ "$pid" == "$keep" ]] || kill "$pid" 2>/dev/null || true
+            done
+            log "attempt $attempt: collapsed $(( ${#live[@]} - 1 )) duplicate(s)"
+        fi
         log "attempt $attempt: survived ${DEADLINE}s - bar is up ($(elapsed "$t0")s total)"
         return 0
     fi
