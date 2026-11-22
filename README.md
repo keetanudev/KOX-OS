@@ -59,3 +59,15 @@ KOX-OS/
 | Open a system panel | click the matching bar widget |
 | Switch power profile | battery panel → power profile pills |
 | Dry-run the lockscreen | `KOX_LOCK_DRY=1 quickshell -p ~/.config/quickshell/lock.qml` |
+
+## Development
+
+This repository is the source of truth for the live desktop. OpenCode and other agents load [`AGENTS.md`](AGENTS.md) automatically; read it before changing anything. It documents the architecture, hard constraints, deployment rules, state files, testing matrix and recovery playbook.
+
+The short version:
+
+- Edit files in this repo, then deploy with `kox update` (a clean worktree is required).
+- Never replace the atomic deployment path with `cp -aT --remove-destination`.
+- Preserve live-only state: theme, accent, wallpaper, cursor and UI scale.
+- Run `bash -n`, `Hyprland --verify-config`, `hyprctl reload` / `hyprctl configerrors` and `kox doctor` before committing.
+- Do not commit font binaries.
