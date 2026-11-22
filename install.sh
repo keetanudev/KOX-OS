@@ -477,13 +477,111 @@ backup_existing_configs() {
     fi
 }
 
+# Deploy a directory tree without ever leaving a destination file missing.
+#
+# `cp -aT --remove-destination` unlinks each destination before recreating it.
+# Hyprland watches its Lua config and reloads when a file changes; a reload
+# landing in that gap cleared the keybind registry, failed to reopen
+# hyprland.lua, and tripped Emergency Mode during `kox update`.
+#
+# Stage a complete copy inside the destination (same filesystem, even when
+# ~/.config is a symlink), then rename each staged entry over its target.
+# rename(2) is atomic, so a watcher always sees either the old inode or the
+# new one -- never a missing path.
+deploy_tree() {
+    local src="$1" dst="$2" label="$3"
+    local stage="" rel entry
+
+    _deploy_tree_fail() {
+        [[ -n "$stage" ]] && rm -rf -- "$stage"
+        die "$*"
+    }
+
+    [[ -d "$src" ]] || _deploy_tree_fail "Cannot deploy $label: $src is not a directory."
+    mkdir -p -- "$dst" || _deploy_tree_fail "Cannot create $dst."
+
+    stage="$(mktemp -d -- "$dst/.kox-deploy.XXXXXX")" ||
+        _deploy_tree_fail "Could not create a staging directory under $dst."
+    # Also covers an unexpected `set -e` exit. The explicit cleanup in
+    # _deploy_tree_fail avoids a second removal on the normal die path.
+    trap 'rm -rf -- "$stage"; trap - RETURN' RETURN
+
+    if ! cp -a -- "$src/." "$stage/"; then
+        _deploy_tree_fail "Could not stage $label in $stage."
+    fi
+
+    # sort -z visits parents before children, so destination directories
+    # exist before their contents are renamed into place.
+    while IFS= read -r -d '' entry; do
+        rel="${entry#"$stage"/}"
+
+        if [[ -d "$entry" && ! -L "$entry" ]]; then
+            if [[ -e "$dst/$rel" && ! -d "$dst/$rel" ]]; then
+                rm -f -- "$dst/$rel"
+            fi
+            mkdir -p -- "$dst/$rel" ||
+                _deploy_tree_fail "Could not create directory: $dst/$rel"
+            continue
+        fi
+
+        mkdir -p -- "$(dirname -- "$dst/$rel")" ||
+            _deploy_tree_fail "Could not create parent directory for: $dst/$rel"
+
+        # A file replacing a directory is rare, but make it deterministic
+        # instead of letting mv fail halfway through the deployment.
+        if [[ -d "$dst/$rel" && ! -L "$dst/$rel" ]]; then
+            rm -rf -- "$dst/$rel"
+        fi
+
+        if ! mv -fT -- "$entry" "$dst/$rel"; then
+            _deploy_tree_fail "Could not deploy $label entry: $rel"
+        fi
+    done < <(find "$stage" -mindepth 1 -print0 | sort -z)
+
+    # Apply directory modes last: a read-only source directory must not
+    # block the file renames above.
+    while IFS= read -r -d '' entry; do
+        rel="${entry#"$stage"/}"
+        chmod --reference="$entry" -- "$dst/$rel" 2>/dev/null || true
+        touch -r "$entry" -- "$dst/$rel" 2>/dev/null || true
+    done < <(find "$stage" -mindepth 1 -type d -print0 | sort -zr)
+
+    rm -rf -- "$stage"
+    trap - RETURN
+}
+
+reload_hyprland_if_running() {
+    step "Reloading Hyprland"
+
+    if [[ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]] || ! command -v hyprctl >/dev/null 2>&1; then
+        info "No running Hyprland session detected; the new config applies at next login."
+        return 0
+    fi
+
+    if ! hyprctl reload >/dev/null 2>&1; then
+        warn "Hyprland is running but could not be reloaded; log out and back in to apply the new configuration."
+        return 0
+    fi
+
+    local errors
+    errors="$(hyprctl configerrors 2>&1 || true)"
+    # hyprctl prints an empty string when the config is clean.
+    if [[ -n "${errors//[[:space:]]/}" ]]; then
+        warn "Hyprland reported configuration errors after deployment:"
+        printf '%s\n' "$errors" | sed 's/^/         /' >&2
+        warn "If the session is unusable, SUPER + SHIFT + ESCAPE opens a rescue kitty terminal."
+    else
+        ok "Hyprland reloaded with a clean configuration."
+    fi
+}
+
 deploy_dotfiles() {
     step "Deploying KOX OS dotfiles"
 
     mkdir -p "$TARGET_HOME/.config" "$TARGET_HOME/.local/bin"
 
     info "Installing ~/.config ..."
-    cp -aT --remove-destination "$REPO_DIR/.config" "$TARGET_HOME/.config"
+    deploy_tree "$REPO_DIR/.config" "$TARGET_HOME/.config" "~/.config"
 
     # The shipped dotfiles are authored at UI scale 10 (Waybar height 24,
     # theme-scale.css 10px, kitty 8pt, fuzzel 12, mako 10). Seed the scale
@@ -497,9 +595,14 @@ deploy_dotfiles() {
     fi
 
     info "Installing ~/.local ..."
-    cp -aT --remove-destination "$REPO_DIR/.local" "$TARGET_HOME/.local"
+    deploy_tree "$REPO_DIR/.local" "$TARGET_HOME/.local" "~/.local"
 
     ok "Dotfiles deployed to $TARGET_HOME"
+
+    # Catch a broken config now, while the installer is still running and
+    # the rescue bind from hyprland.lua is available, rather than on the
+    # next reload or boot.
+    reload_hyprland_if_running
 }
 
 deploy_wallpapers() {

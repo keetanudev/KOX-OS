@@ -15,9 +15,15 @@ local monitor = terminal .. " -e btop"
 -- home is resolved at runtime so this config is portable across users/machines
 local home = os.getenv("HOME") or "/root"
 
+-- Exposed to hyprland.lua's emergency-mode guard. Zero means the normal
+-- keymap did not register, so the rescue bind must stay active.
+KOX_BINDINGS_REGISTERED = 0
+
 local function safe_bind(keys, action, opts)
   local ok, err = pcall(hl.bind, keys, action, opts)
-  if not ok then
+  if ok then
+    KOX_BINDINGS_REGISTERED = KOX_BINDINGS_REGISTERED + 1
+  else
     print("[bindings] skipped '" .. keys .. "': " .. tostring(err))
   end
 end
