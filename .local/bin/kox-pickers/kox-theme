@@ -32,6 +32,12 @@
 # Usage: kox-theme [--restore | <theme-name>]
 set -u
 
+# --restore re-applies the saved theme after a dotfile deploy. It must not
+# touch the wallpaper: the installer restores the saved wallpaper separately,
+# and a theme's representative wallpaper must never overwrite the user's
+# choice during an update.
+RESTORE_MODE=0
+
 STATE_DIR="$HOME/.config/kox/pickers"
 STATE="$STATE_DIR/theme"
 ACCENT_STATE="$STATE_DIR/accent"
@@ -205,7 +211,10 @@ apply_spec() { # $1 = spec line
   # 5. Wallpaper swap (the rice's theme = accent + wallpaper). Routed
   #    through kox-wallpaper --set so the hyprpaper apply path (conf
   #    rewrite + daemon restart + state file) stays owned by one script.
-  if [[ -x "$HOME/.local/bin/kox-pickers/kox-wallpaper" && -r "$wall" ]]; then
+  #    Skipped in --restore mode: the saved wallpaper is the user's choice,
+  #    and the installer applies it separately after the theme.
+  if (( ! RESTORE_MODE )) &&
+     [[ -x "$HOME/.local/bin/kox-pickers/kox-wallpaper" && -r "$wall" ]]; then
     "$HOME/.local/bin/kox-pickers/kox-wallpaper" --set "$wall" >/dev/null 2>&1 || true
   fi
 
@@ -251,6 +260,7 @@ if [[ "${1:-}" == "--restore" ]]; then
   # Re-apply the saved choice after a dotfile deploy. Every consumer reads
   # a file, but the installer overwrites those files with the shipped
   # defaults, so restoring has to write the saved choice back.
+  RESTORE_MODE=1
   SAVED="$(cat "$STATE" 2>/dev/null || true)"
   if [[ -n "$SAVED" ]]; then
     for spec in "${THEMES[@]}"; do
