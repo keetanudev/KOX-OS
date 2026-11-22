@@ -793,6 +793,15 @@ window.kox-panel { background: transparent; }
   font-size: 11px;
 }
 
+/* GTK themes paint a 1px inset white highlight along the top edge of buttons.
+   It shows through our dark surfaces as a bright stripe inside the border -
+   worst on hover, when the state fill makes it look like a rendering glitch.
+   KOX surfaces are flat, so clear it and let our own fills be the only cue. */
+button, button:hover, button:active, button:focus,
+button.flat, button.pill, button.sq {
+  box-shadow: none;
+}
+
 /* header: big glyph, name, letter-spaced status, QR + switch on the right */
 .hdr { padding: 0 0 10px 0; }
 .hdr-icon { font-size: 21px; color: #e6e7e9; }
@@ -870,14 +879,21 @@ row {
   background-image: none;
   border-radius: 8px;
   padding: 6px 8px;
-  margin: 0;
+  margin: 2px 0;
 }
 row:hover, row.activatable:hover,
-row:active, row.activatable:active,
+row:active, row.activatable:active {
+  background: #262a31;
+  background-image: none;
+}
 row:focus, row.activatable:focus,
 row:selected, row.activatable:selected,
-row.row-sel, row.row-sel:hover, row.row-sel:selected, row.row-sel:focus {
+row.row-sel, row.row-sel:selected, row.row-sel:focus {
   background: #22252b;
+  background-image: none;
+}
+row.row-sel:hover {
+  background: #262a31;
   background-image: none;
 }
 
@@ -899,7 +915,7 @@ button.flat {
   border-radius: 7px;
   font-size: 13px;
 }
-button.flat:hover { background: #2f343c; color: #e6e7e9; }
+button.flat:hover { background: #262a31; color: #e6e7e9; }
 button.flat.danger:hover { background: rgba(255, 107, 107, 0.14); color: #ff6b6b; }
 
 /* outlined pills: DNS provider, Run, form buttons. Side padding is tiny on
@@ -912,7 +928,7 @@ button.pill {
   color: #e6e7e9;
   font-size: 10px;
 }
-button.pill:hover { background: #22252b; }
+button.pill:hover { background: #262a31; }
 button.pill:active { background: #2f343c; }
 button.pill.active { background: #2f343c; border-color: #4a5058; }
 
@@ -1538,6 +1554,7 @@ class Panel(Gtk.Window):
             entry[0].set_visible(bool(content))
         box.set_visible(bool(content))
 
+    ROW_HOVER = (0x26 / 255, 0x2A / 255, 0x31 / 255, 1.0)
     ROW_DARK = (0x22 / 255, 0x25 / 255, 0x2B / 255, 1.0)
 
     def _row(self, icon, name, sub, active=False, on_activate=None, trailing=None):
@@ -1549,7 +1566,7 @@ class Panel(Gtk.Window):
         # same style context, so the CSS border-radius still rounds them.
         for flag, rgba in (
             (Gtk.StateFlags.NORMAL, Gdk.RGBA(0, 0, 0, 0)),
-            (Gtk.StateFlags.PRELIGHT, Gdk.RGBA(*self.ROW_DARK)),
+            (Gtk.StateFlags.PRELIGHT, Gdk.RGBA(*self.ROW_HOVER)),
             (Gtk.StateFlags.SELECTED, Gdk.RGBA(*self.ROW_DARK)),
             (Gtk.StateFlags.ACTIVE, Gdk.RGBA(*self.ROW_DARK)),
             (Gtk.StateFlags.FOCUSED, Gdk.RGBA(*self.ROW_DARK)),
