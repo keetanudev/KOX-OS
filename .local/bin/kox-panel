@@ -991,7 +991,7 @@ def theme_accent():
     file or no definition -> the KOX pink."""
     try:
         with open(os.path.expanduser("~/.config/waybar/theme-accent.css")) as fh:
-            match = re.search(r"@define-color\s+accent\s+([^;]+);", fh.read())
+            match = re.search(r"@define-color\s+accent(?:_color)?\s+([^;]+);", fh.read())
         if match:
             return match.group(1).strip()
     except OSError:
