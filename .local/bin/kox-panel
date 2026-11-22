@@ -916,6 +916,11 @@ button.flat {
   font-size: 13px;
 }
 button.flat:hover { background: #262a31; color: #e6e7e9; }
+/* The MD trash glyph paints wider than its advance and overhangs to the
+   right, so symmetric padding leaves it sitting right inside the hover pill.
+   Extra right padding centres the ink without moving the neighbouring lock
+   glyph. Used only by the Forget device / Forget network actions. */
+button.flat.danger { padding-right: 8px; }
 button.flat.danger:hover { background: rgba(255, 107, 107, 0.14); color: #ff6b6b; }
 
 /* outlined pills: DNS provider, Run, form buttons. Side padding is tiny on
