@@ -62,8 +62,8 @@ MAKO_REF=11                 # trailing size in mako font=
 # panel class : reference px (from the panel's built-in CSS)
 PANEL_REFS=(
     ".panel:11" ".hdr-icon:21" ".hdr-title:14" ".hdr-sub:9"
-    "button.sq:14" ".section:9" "button.flat:12" "button.pill:10"
-    ".row-icon:13" ".row-name:12" ".row-sub:10" ".row-trail:12"
+    "button.sq:14" ".section:9" "button.flat:13" "button.pill:10"
+    ".row-icon:15" ".row-name:12" ".row-sub:10" ".row-trail:13"
     ".hint:10" "entry:11"
 )
 

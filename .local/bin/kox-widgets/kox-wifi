@@ -16,8 +16,8 @@
 #   kox-wifi toggle   Wi-Fi radio on/off
 set -u
 
-ICON_OFF="󰤭"; ICON_IDLE="󰤯"; ICON_ETH="󰈀"
-ICON_1="󰤟"; ICON_2="󰤢"; ICON_3="󰤧"; ICON_4="󰤨"
+ICON_OFF="󰖪"; ICON_IDLE="󰤯"; ICON_ETH="󰈀"
+ICON_1="󰤟"; ICON_2="󰤢"; ICON_3="󰤧"; ICON_4="󰖩"
 
 notify() { notify-send "Wi-Fi" "$1" 2>/dev/null || true; }
 

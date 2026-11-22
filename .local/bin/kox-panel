@@ -164,38 +164,49 @@ PANEL_WIDTH = 350
 GAP = 10
 DOT = "\u00b7"  # middle dot, matches the reference panel typography
 
-# Nerd Font glyphs (Font Awesome range), verified present in the installed
-# JetBrainsMonoNL Nerd Font.
+# Material Design Nerd Font glyphs, verified present in JetBrainsMono Nerd Font.
+# Consistent across Waybar modules and KOX OS dropdown panels.
 ICONS = {
-    "bluetooth": "\uf293",
-    "wifi": "\uf1eb",
-    "battery_full": "\uf240",
-    "battery_half": "\uf242",
-    "battery_empty": "\uf244",
-    "battery_bolt": "\uf0e7",
-    "trash": "\uf1f8",
-    "refresh": "\uf021",
-    "volume": "\uf028",
-    "volume_mute": "\uf026",
-    "sun": "\uf185",
-    "check": "\uf00c",
-    "plug": "\uf1e6",
-    "play": "\uf04b",
-    "stop": "\uf04d",
-    "link": "\uf0c1",
-    "signal": "\uf012",
-    "carrot": "\uf157",
-    "adjust": "\uf042",
-    "tachometer": "\uf0e4",
-    "lock": "\uf023",
-    "qrcode": "\uf03d8",
-    # Material-Design wifi glyphs (supplementary plane), cmap-verified against
-    # JetBrainsMonoNerdFont-Regular.ttf: signal fan + off state.
-    "wifi_s1": "\U000F091F",
-    "wifi_s2": "\U000F0922",
-    "wifi_s3": "\U000F0925",
-    "wifi_s4": "\U000F0928",
-    "wifi_off": "\U000F092E",
+    # Connectivity
+    "bluetooth": "\U000F00AF",        # 󰂯 md-bluetooth
+    "bluetooth_conn": "\U000F009A",   # 󰂚 md-bluetooth_connect
+    "bluetooth_off": "\U000F00B2",    # 󰂲 md-bluetooth_off
+    "wifi": "\U000F05A9",             # 󰖩 md-wifi
+    "wifi_off": "\U000F05AA",         # 󰖪 md-wifi_off
+    "wifi_s4": "\U000F05A9",          # 󰖩 md-wifi (clear waves)
+    "wifi_s3": "\U000F0927",          # 󰤧 md-wifi_strength_3
+    "wifi_s2": "\U000F0922",          # 󰤢 md-wifi_strength_2
+    "wifi_s1": "\U000F091F",          # 󰤟 md-wifi_strength_1
+    # Battery & Power
+    "battery_full": "\U000F0079",     # 󰁹 md-battery
+    "battery_80": "\U000F0082",       # 󰂂 md-battery_80
+    "battery_half": "\U000F007E",     # 󰁾 md-battery_50
+    "battery_low": "\U000F007C",      # 󰁼 md-battery_20
+    "battery_empty": "\U000F007A",    # 󰁺 md-battery_10
+    "battery_bolt": "\U000F0084",     # 󰂄 md-battery_charging
+    "plug": "\U000F06A5",             # 󰚥 md-power_plug
+    # Actions & Controls
+    "trash": "\U000F01B5",            # 󰆵 md-delete_outline
+    "refresh": "\U000F0450",          # 󰑐 md-refresh
+    "volume": "\U000F057E",           # 󰕾 md-volume_high
+    "volume_mute": "\U000F075F",      # 󰝟 md-volume_off
+    "sun": "\U000F00E0",              # 󰃠 md-brightness_7
+    "check": "\U000F012C",            # 󰄬 md-check
+    "connect": "\U000F0339",          # 󰌹 md-link
+    "disconnect": "\U000F033A",       # 󰌺 md-link_off
+    "link": "\U000F0339",             # 󰌹 md-link
+    "lock": "\U000F033E",             # 󰌾 md-lock
+    "qrcode": "\U000F0430",           # 󰐰 md-qrcode
+    # Power profiles
+    "performance": "\U000F04C5",      # 󰓅 md-speedometer
+    "balanced": "\U000F05D1",         # 󰗑 md-scale_balance
+    "power_saver": "\U000F032A",      # 󰌪 md-leaf
+    # Backward compatibility aliases
+    "play": "\U000F0339",
+    "stop": "\U000F033A",
+    "carrot": "\U000F032A",
+    "adjust": "\U000F05D1",
+    "tachometer": "\U000F04C5",
 }
 
 # ---------------------------------------------------------------------------
@@ -870,11 +881,11 @@ row.row-sel, row.row-sel:hover, row.row-sel:selected, row.row-sel:focus {
   background-image: none;
 }
 
-.row-icon { font-size: 13px; color: #8f959e; }
+.row-icon { font-size: 15px; color: #8f959e; }
 .row-name { font-size: 12px; color: #e6e7e9; }
 .row-name.lit { color: %%ACCENT%%; }
 .row-sub { font-size: 10px; color: #8f959e; }
-.row-trail { font-size: 12px; color: #8f959e; }
+.row-trail { font-size: 13px; color: #8f959e; }
 .dim { color: #8f959e; }
 .accent { color: %%ACCENT%%; }
 .hint { font-size: 10px; color: #8f959e; padding: 5px 2px; }
@@ -886,7 +897,7 @@ button.flat {
   color: #8f959e;
   padding: 2px 4px;
   border-radius: 7px;
-  font-size: 12px;
+  font-size: 13px;
 }
 button.flat:hover { background: #2f343c; color: #e6e7e9; }
 button.flat.danger:hover { background: rgba(255, 107, 107, 0.14); color: #ff6b6b; }
@@ -1550,8 +1561,8 @@ class Panel(Gtk.Window):
         row.add(box)
         if icon:
             icon_lbl = label(icon, "row-icon")
-            # Level the row icon with the network name (first text line).
-            icon_lbl.set_valign(Gtk.Align.START)
+            # Center the row icon vertically for balanced alignment across 1- and 2-line rows.
+            icon_lbl.set_valign(Gtk.Align.CENTER)
             box.pack_start(icon_lbl, False, False, 0)
         text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
         name_lbl = label(name, "row-name", ellipsize=True)
@@ -1561,6 +1572,7 @@ class Panel(Gtk.Window):
             text_box.pack_start(label(sub, "row-sub", ellipsize=True), False, False, 0)
         box.pack_start(text_box, True, True, 0)
         if trailing:
+            trailing.set_valign(Gtk.Align.CENTER)
             box.pack_end(trailing, False, False, 0)
         # States only ever move the TEXT to the accent (backgrounds stay
         # dark). CSS :state descendant selectors are unreliable in GTK3, so
@@ -1758,22 +1770,25 @@ class Panel(Gtk.Window):
         return action
 
     def refresh_bluetooth(self):
-        self._set(self.hdr_icon, ICONS["bluetooth"])
         powered = Bluetooth.powered()
         if powered is None:
+            self._set(self.hdr_icon, ICONS["bluetooth_off"])
             self._set(self.hdr_title, "Bluetooth")
             self._set(self.hdr_sub, "ADAPTER UNAVAILABLE")
             self._fill("status", None, ("none",), lambda: [label("Bluetooth service is not responding.", "hint")])
             return
-        self._set(self.hdr_title, "Bluetooth")
         self._set_safe(self.power_switch, powered)
 
         paired = Bluetooth.paired()
         known = Bluetooth.known()
         if paired is None or known is None:
+            self._set(self.hdr_icon, ICONS["bluetooth"])
+            self._set(self.hdr_title, "Bluetooth")
             self._set(self.hdr_sub, f"ADAPTER BUSY {DOT} RETRYING")
             return
         if not powered:
+            self._set(self.hdr_icon, ICONS["bluetooth_off"])
+            self._set(self.hdr_title, "Bluetooth")
             self._set(self.hdr_sub, "OFF")
             self._fill("status", None, ("off",), lambda: [label("Turn the switch on to see paired devices.", "hint")])
             self._fill("paired", "paired devices", ("off",), lambda: [])
@@ -1790,6 +1805,7 @@ class Panel(Gtk.Window):
         connected_name = next(
             (name for mac, name in paired if states[mac][0] == "yes"), None
         )
+        self._set(self.hdr_icon, ICONS["bluetooth_conn"] if connected_name else ICONS["bluetooth"])
         self._set(self.hdr_title, connected_name or "Bluetooth")
         if connected_name:
             self._set(self.hdr_sub, "CONNECTED")
@@ -1815,7 +1831,7 @@ class Panel(Gtk.Window):
                 trailing = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
                 trailing.pack_start(
                     self._flat_button(
-                        ICONS["stop"] if is_on else ICONS["play"],
+                        ICONS["disconnect"] if is_on else ICONS["connect"],
                         "Disconnect" if is_on else "Connect",
                         self._bt_toggle(mac, name, is_on),
                     ),
@@ -1833,7 +1849,7 @@ class Panel(Gtk.Window):
                 )
                 rows.append(
                     self._row(
-                        ICONS["link"] if is_on else ICONS["bluetooth"],
+                        ICONS["bluetooth_conn"] if is_on else ICONS["bluetooth"],
                         name,
                         sub,
                         active=is_on,
@@ -2222,7 +2238,7 @@ class Panel(Gtk.Window):
             return  # keep the last list and the "Connecting…" header
         on = Wifi.radio_on()
         self._set_safe(self.power_switch, on)
-        self._set(self.hdr_icon, ICONS["wifi_s4"] if on else ICONS["wifi_off"])
+        self._set(self.hdr_icon, ICONS["wifi"] if on else ICONS["wifi_off"])
         active = Wifi.active_ssid()
         details = Wifi.link_details() if on else None
         connected = bool(details and details["con"])
@@ -2299,7 +2315,7 @@ class Panel(Gtk.Window):
                         trailing.pack_start(label(ICONS["lock"], "row-trail"), False, False, 0)
                 rows.append(
                     self._row(
-                        ICONS["wifi_s4"] if in_use else self._strength_icon(net.get("signal", 0)),
+                        ICONS["wifi"] if in_use else self._strength_icon(net.get("signal", 0)),
                         ssid,
                         sub,
                         active=in_use,
@@ -2382,9 +2398,9 @@ class Panel(Gtk.Window):
         if shutil.which("powerprofilesctl") and Power.profile() is not None:
             profiles = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
             for name, glyph in (
-                ("performance", ICONS["tachometer"]),
-                ("balanced", ICONS["adjust"]),
-                ("power-saver", ICONS["carrot"]),
+                ("performance", ICONS["performance"]),
+                ("balanced", ICONS["balanced"]),
+                ("power-saver", ICONS["power_saver"]),
             ):
                 btn = Gtk.Button()
                 btn.set_relief(Gtk.ReliefStyle.NONE)
@@ -2463,16 +2479,19 @@ class Panel(Gtk.Window):
             self._set(self.hdr_sub, "NO BATTERY DETECTED")
             return
         pct, status, left = bat
-        icon = (
-            ICONS["battery_full"]
-            if pct >= 90
-            else ICONS["battery_half"]
-            if pct >= 45
-            else ICONS["battery_empty"]
-        )
         charging = status.lower() in ("charging", "full")
         if charging:
             icon = ICONS["battery_bolt"]
+        elif pct >= 90:
+            icon = ICONS["battery_full"]
+        elif pct >= 70:
+            icon = ICONS["battery_80"]
+        elif pct >= 45:
+            icon = ICONS["battery_half"]
+        elif pct >= 20:
+            icon = ICONS["battery_low"]
+        else:
+            icon = ICONS["battery_empty"]
         self._set(self.hdr_icon, icon)
         self._set(self.hdr_title, f"{pct}%")
         left_text = human_minutes(left)
