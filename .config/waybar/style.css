@@ -180,6 +180,13 @@ window#waybar > box {
     margin-right: 1px;
 }
 
+/* Transparent colours alone do not stop GTK from painting the button's
+   hover outline and label. Zero opacity hides every paint while keeping the
+   ghost's layout width, so the notch stays balanced. */
+#workspaces.ghost {
+    opacity: 0;
+}
+
 #workspaces.ghost,
 #workspaces.ghost button,
 #workspaces.ghost button:hover,

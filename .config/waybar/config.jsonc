@@ -28,7 +28,9 @@
     "modules-right": [],
 
     "hyprland/workspaces": {},
-    "hyprland/workspaces#ghost": {},
+    "hyprland/workspaces#ghost": {
+        "tooltip": false
+    },
 
     "clock": {
         "format": "{:%H:%M}"
