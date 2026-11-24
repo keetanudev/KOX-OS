@@ -82,7 +82,7 @@ These are hard constraints. Breaking one is a regression even if the feature “
 7. **`kox-theme --restore` must not apply the theme’s representative wallpaper.** The saved wallpaper is the user’s choice and is restored separately.
 8. **Keep the rescue bind contract.** `SUPER + SHIFT + ESCAPE` must exist before any module loads and may be removed only after all modules load and at least one normal bind registers.
 9. **One Waybar instance only.** The shared lock, duplicate collapse, child-fd close, and wait-for-old-bar logic are load-bearing.
-10. **NetworkManager owns networking.** `connmand` stays disabled. BlueZ must have `AutoEnable=true`.
+10. **NetworkManager owns networking.** `connmand` stays disabled. BlueZ must have `AutoEnable=true`. The `network` group must also have the KOX polkit rule (`etc/polkit-1/rules.d/49-kox-network.rules`); without it, panel Wi-Fi actions fail with `Insufficient privileges` because no polkit agent runs in the Hyprland session.
 11. **The repo’s `hyprpaper.conf` uses `~/Pictures/Wallpapers/...`.** The live SATA/NVMe copy may contain an absolute path; that difference is expected and must not be “fixed” in place.
 12. **This Hyprland build has no `hyprctl keyword`.** Use `hyprctl eval` for dynamic config. `hyprctl configerrors` prints an empty string when clean.
 13. **Do not add a second bar, a second panel daemon, or a second Bluetooth watcher.** All are one-shot or lock-guarded by design.

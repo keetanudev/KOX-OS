@@ -933,7 +933,7 @@ setup_services() {
 setup_groups() {
     step "Configuring user groups"
 
-    local wanted=(wheel audio video storage)
+    local wanted=(wheel network audio video storage)
     local present=() missing=()
     local group
 
@@ -971,6 +971,27 @@ setup_groups() {
         info "Group changes take effect after you log out or reboot."
     else
         warn "Could not add $TARGET_USER to: ${needed[*]}"
+    fi
+}
+
+install_system_files() {
+    step "Installing KOX system configuration"
+
+    local rule_src="$REPO_DIR/etc/polkit-1/rules.d/49-kox-network.rules"
+    local rule_dst="/etc/polkit-1/rules.d/49-kox-network.rules"
+
+    # NetworkManager's stock polkit rule only allows the wheel group, and
+    # KOX runs no polkit authentication agent inside the Hyprland session.
+    # Without this rule every Wi-Fi connect/forget from the panel fails with
+    # "Insufficient privileges". The network group is the intended gate.
+    if [[ -f "$rule_src" ]]; then
+        if sudo install -Dm644 -o root -g root "$rule_src" "$rule_dst"; then
+            ok "Installed NetworkManager polkit rule."
+        else
+            warn "Could not install the NetworkManager polkit rule."
+        fi
+    else
+        warn "Missing $rule_src; Wi-Fi management may require authentication."
     fi
 }
 
@@ -1014,6 +1035,7 @@ main() {
     configure_shell
     setup_services
     setup_groups
+    install_system_files
     verify_deploy
     print_final
 }

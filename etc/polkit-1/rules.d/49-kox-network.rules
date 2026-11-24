@@ -1,0 +1,12 @@
+// KOX OS — allow members of the `network` group to manage system network
+// connections (add/activate/forget, DNS changes) without an authentication
+// prompt. NM's shipped rule only whitelists `wheel`, which the user is not in,
+// and no polkit authentication agent runs in the session, so an auth_admin
+// challenge could never be answered — every Wi-Fi connect failed with
+// "Insufficient privileges". The `network` group exists exactly for this.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.NetworkManager.settings.modify.system" &&
+        subject.isInGroup("network")) {
+        return polkit.Result.YES;
+    }
+});
