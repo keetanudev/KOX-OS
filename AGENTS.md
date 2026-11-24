@@ -2,7 +2,7 @@
 
 **Read this entire file before changing anything.** It is the persistent brief for OpenCode and any engineer working on KOX OS. When this document and the live system disagree, treat the repo as the source of truth and the live system as the symptom: investigate both before overwriting either.
 
-Last updated: **2026-11-22**, repo **`2408f6b`**.
+Last updated: **2026-11-24**. Migration baseline: **`b859001`**; verify current HEAD with `git log`.
 
 ---
 
@@ -54,17 +54,18 @@ Target: a fast, self-contained, fresh-installable desktop. Idle RAM budget: **�
 | Bar | Waybar 0.16.0 |
 | Terminal | kitty 0.50.0 |
 | Shell UI | Quickshell 0.3.2 |
-| Current theme | `catppuccin` |
-| Current accent | `#cba6f7` (border state `cba6f7ee`) |
-| Current wallpaper | `/home/ved/Pictures/Wallpapers/dark-crimson-city-night.jpg` |
+| Current theme | `tokyonight` |
+| Current accent | `#7aa2f7` (border state `7aa2f7ee`) |
+| Current wallpaper | `/home/ved/Pictures/Wallpapers/4.jpg` |
+| Current cursor | `macOS-White` |
 | UI scale | `10` |
 | Baseline bind count | 115 |
 
-The **SATA machine** (`artix`) is the older live system and shares the same repo. Its theme is `materia` (`#2ec4b6`). Do not copy the SATA appearance state onto the NVMe; the NVMe’s purple `catppuccin` identity is intentional and must be preserved.
+The **SATA machine** (`artix`) is being wiped for a separate Arch install. KOX OS continues on the NVMe. The SATA’s last KOX state (`materia`, `#2ec4b6`) is archived under `~/Documents/KOX-OS/sata-state-2026-11-24/`; do not copy it over the NVMe’s current look.
 
 ### Fonts
 
-The lockscreen uses the Nothing dot-matrix face (Ndot 57) and other proprietary community fonts. They are installed **user-level** in `~/.local/share/fonts/` and are **never committed** to the repo.
+The lockscreen uses the Nothing dot-matrix face (Ndot 57) and other proprietary community fonts. They are installed **user-level** in `~/.local/share/fonts/ndot/` and are **never committed** to the repo. The bar and GTK panels use **JetBrainsMono Nerd Font** (system package `ttf-jetbrains-mono-nerd`); the Material-style panel glyphs depend on it.
 
 ---
 
@@ -524,15 +525,19 @@ If Quickshell fails, `kox-lock` falls back to `hyprlock`. The session must never
 
 ## 10. Current baseline and open work
 
-Snapshot at the time of writing (verify with `git log`):
+Current baseline (verify with `git log`):
 
-- `main == origin/main == 2408f6b`
+- Migration baseline: `b859001` (`main == origin/main` at migration time)
 - Latest commits:
-  - `f4fd974` — Fix Hyprland emergency mode during dotfile deploy
+  - `b859001` — Fix: ship cachy-screenrecord-status companion script
+  - `9ebea09` … `74c877f` — panel/widget polish: Material icons, hover fills, accent resolution, ghost-hover fix
+  - `fb75b22` — Docs: add AGENTS.md master context
   - `2408f6b` — Preserve saved wallpaper during theme restore
-- NVMe repo is clean at `2408f6b`; the NVMe is unmounted and ready to boot.
-- NVMe appearance: `catppuccin`, accent `#cba6f7`, wallpaper `dark-crimson-city-night.jpg`, `ui-scale=10`.
-- SATA appearance: `materia`, accent `#2ec4b6`, wallpaper `dark-boreal-eclipse-castle.jpg`, `ui-scale=10`.
+- The NVMe repo was clean at the migration baseline; the NVMe is unmounted and ready to boot.
+- Live code matches the repo. The only live differences are the five appearance-generated files (fuzzel, hyprpaper, kitty, mako, theme-accent) that carry the current theme.
+- NVMe appearance: `tokyonight`, accent `#7aa2f7`, wallpaper `4.jpg`, cursor `macOS-White`, `ui-scale=10`.
+- Ndot lockscreen fonts are installed at `~/.local/share/fonts/ndot/` and visible to fontconfig.
+- SATA is being wiped for Arch. Its KOX state, legacy scripts and OpenCode history are archived under `~/Documents/KOX-OS/`.
 
 ### Pending NVMe boot verification
 
@@ -547,16 +552,17 @@ Then confirm:
 1. Exactly one Waybar bar.
 2. Wi-Fi and Bluetooth work from the bar panels.
 3. `kitty` opens tiled/normal, not fullscreen.
-4. `kox theme` opens the coverflow picker with `catppuccin` active.
+4. `kox theme` opens the coverflow picker with `tokyonight` active.
 5. `kox wallpaper` opens the coverflow picker with thumbnails.
-6. `kox update` completes without Emergency Mode and preserves the purple theme, wallpaper and scale.
+6. `kox update` completes without Emergency Mode and preserves `tokyonight`, wallpaper `4.jpg`, cursor `macOS-White` and scale `10`.
 7. `SUPER + SHIFT + ESCAPE` is not needed in a healthy session but remains available.
 
 ### Reports and artifacts
 
-- Latest written report (on the SATA system): `/home/artix/Documents/ved/KOX-OS-Report-2026-11-22.md`
-- Emergency Mode diagnosis: `~/Panic` (SATA).
-- Superseded NVMe staged draft: `/tmp/opencode/nvme-staged-emergency-draft.patch` (temporary).
+- Latest written report: `~/Documents/KOX-OS/KOX-OS-Report-2026-11-22.md`
+- Migration archive: `~/Documents/KOX-OS/` — README, SATA KOX state, legacy scripts, OpenCode history, package list and checksums.
+- Emergency Mode diagnosis: `~/Documents/KOX-OS/Panic.md`
+- A copy of the latest report is also at `~/Documents/ved/KOX-OS-Report-2026-11-22.md`.
 
 ---
 
