@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # cachy-powermenu: premium fuzzel-based system menu (Super+Escape equivalent).
-set -euo pipefail
+# NOTE: no `set -e` on purpose. fuzzel exits non-zero when the user cancels;
+# swallowing that lets the action case below run on the *previous* or empty
+# selection. Echo the menu result to stderr instead so failures are visible
+# in ~/.local/state or journald while staying non-fatal.
+set -uo pipefail
 
 MENU_CFG="$HOME/.config/fuzzel/powermenu.ini"
 CHOICE="$(printf '%s\n' \
@@ -10,15 +14,25 @@ CHOICE="$(printf '%s\n' \
   '󰐥   Power off' \
   '󰗼   Log out' |
   fuzzel --config "$MENU_CFG" --dmenu \
-        --mesg "Power & session" --prompt '  ')" || exit 0
+        --mesg "Power & session" --prompt '  ' 2>&1 || true)"
 
 # Strip the leading glyph (and surrounding spaces) to recover the action label.
 ACTION="${CHOICE#*   }"
 
+run_loginctl() {
+    if ! loginctl "$@" >/dev/null 2>&1; then
+        notify-send --urgency=critical "Power menu" "Could not run: loginctl $*" 2>/dev/null || true
+    fi
+}
+
 case "$ACTION" in
-  Lock)       exec cachy-lock ;;
-  Suspend)    exec loginctl suspend ;;
-  Reboot)     exec loginctl reboot ;;
-  "Power off") exec loginctl poweroff ;;
-  "Log out")  exec cachy-hyprctl dispatch 'hl.dsp.exit()' ;;
+  Lock)         exec cachy-lock ;;
+  Suspend)      run_loginctl suspend ;;
+  Reboot)       run_loginctl reboot ;;
+  "Power off")  run_loginctl poweroff ;;
+  "Log out")    exec cachy-hyprctl dispatch 'hl.dsp.exit()' ;;
+  *)
+    # Fuzzel exited without a selection: nothing to do.
+    exit 0
+    ;;
 esac

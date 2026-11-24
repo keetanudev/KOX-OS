@@ -1,0 +1,14 @@
+// KOX OS — allow suspend/power off/reboot for local logind sessions without an
+// interactive polkit agent. The standard Hyprland session has no polkit agent,
+// so on some Arch installations (where the default policy is auth_admin_keep
+// for suspend/power-off/reboot) the power menu fails silently. On other Arch
+// builds the default is already allow_active=yes and this rule is a no-op.
+polkit.addRule(function(action, subject) {
+    if (subject.isLocal) {
+        if (action.id === "org.freedesktop.login1.suspend" ||
+            action.id === "org.freedesktop.login1.power-off" ||
+            action.id === "org.freedesktop.login1.reboot") {
+            return polkit.Result.YES;
+        }
+    }
+});

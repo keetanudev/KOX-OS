@@ -1228,6 +1228,23 @@ install_system_files() {
     else
         warn "Missing $rule_src; Wi-Fi management may require authentication."
     fi
+
+    # Arch/systemd only: some Arch logind policies require interactive
+    # authentication for suspend/power-off/reboot and the Hyprland session
+    # runs no polkit agent, so the power menu silently does nothing. The
+    # rule allows these actions for local sessions (an explicit, defensive
+    # counterpart to the default policy).
+    if [[ "$INIT_SYSTEM" == systemd && "$DISTRO_FAMILY" == arch ]]; then
+        local lr_src="$REPO_DIR/etc/polkit-1/rules.d/10-kox-login1-noauth.rules"
+        local lr_dst="/etc/polkit-1/rules.d/10-kox-login1-noauth.rules"
+        if [[ -f "$lr_src" ]]; then
+            if sudo install -Dm644 -o root -g root "$lr_src" "$lr_dst"; then
+                ok "Installed Arch logind polkit rule (power menu)."
+            else
+                warn "Could not install the Arch logind polkit rule."
+            fi
+        fi
+    fi
 }
 
 print_final() {
