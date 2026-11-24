@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# KOX OS - publish the Hyprland session environment.
+#
+# D-Bus activation needs WAYLAND_DISPLAY, XDG_CURRENT_DESKTOP and friends so
+# portals and bus-launched apps inherit the session. On a systemd host the
+# user manager needs the same variables; OpenRC has no systemd user manager,
+# so that step is skipped there.
+set -u
+
+dbus-update-activation-environment --all 2>/dev/null || true
+
+if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
+    systemctl --user import-environment 2>/dev/null || true
+fi

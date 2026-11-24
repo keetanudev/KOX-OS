@@ -11,8 +11,9 @@ hl.on("hyprland.start", function()
     -- env; kox-scale apply below handles a bar that is already running.
     hl.exec_cmd("kox-waybar-autostart")
 
-    -- Export session env into dbus activation env (OpenRC: no systemd import)
-    hl.exec_cmd("dbus-update-activation-environment --all")
+    -- Publish session env to D-Bus activation and, on systemd hosts, to the
+    -- user manager (OpenRC has no systemd import; the wrapper detects it).
+    hl.exec_cmd("kox-session-env")
 
     -- UI scale: re-apply the stored state once per session. Consumer
     -- configs persist on disk, so on a normal boot this is a byte-level
@@ -27,9 +28,10 @@ hl.on("hyprland.start", function()
     -- the clock notch perfectly still across connect/disconnect).
     hl.exec_cmd("kox-bt-watcher")
 
-    -- Audio: pipewire-pulse (PulseAudio compatibility socket). pipewire +
-    -- wireplumber come up as OpenRC user services; the wrapper guards against
-    -- a second instance and waits for the pipewire core socket first.
+    -- Audio: pipewire-pulse (PulseAudio compatibility socket). Under OpenRC
+    -- pipewire + wireplumber are user services; under systemd the packaged
+    -- sockets are started here when needed. The wrapper is idempotent and
+    -- waits for the pipewire core socket before falling back.
     hl.exec_cmd("kox-pulse-autostart")
 
     -- Panel daemon: bar-anchored dropdowns for wifi / bluetooth / battery

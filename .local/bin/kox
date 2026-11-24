@@ -73,7 +73,31 @@ doctor_fail() {
     doctor_row fail "$@"
 }
 
+init_system() {
+    if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
+        printf 'systemd\n'
+    else
+        printf 'openrc\n'
+    fi
+}
+
 check_pipewire() {
+    if [[ "$(init_system)" == systemd ]]; then
+        local unit active=0
+        for unit in pipewire.socket pipewire.service pipewire-pulse.socket pipewire-pulse.service; do
+            if systemctl --user is-active --quiet "$unit" 2>/dev/null; then
+                active=1
+                break
+            fi
+        done
+        if (( active )) || pgrep -x pipewire >/dev/null 2>&1; then
+            doctor_ok "PipeWire" "systemd user units are running"
+        else
+            doctor_fail "PipeWire" "systemd user units are not running"
+        fi
+        return
+    fi
+
     if ! command -v rc-service >/dev/null 2>&1; then
         doctor_fail "PipeWire" "rc-service not found"
     elif rc-service --user pipewire status >/dev/null 2>&1; then
@@ -85,6 +109,15 @@ check_pipewire() {
 
 check_bluetooth() {
     local svc out stopped='' exists=0
+
+    if [[ "$(init_system)" == systemd ]]; then
+        if systemctl is-active --quiet bluetooth 2>/dev/null; then
+            doctor_ok "Bluetooth" "bluetooth service is running"
+        else
+            doctor_fail "Bluetooth" "bluetooth service is stopped"
+        fi
+        return
+    fi
 
     if ! command -v rc-service >/dev/null 2>&1; then
         doctor_fail "Bluetooth" "rc-service not found"

@@ -2,13 +2,16 @@
 # =============================================================================
 #  KOX OS installer
 #
-#  Deploys the KOX OS desktop on a fresh Artix Linux (OpenRC) installation.
+#  Deploys the KOX OS desktop on a fresh Artix Linux (OpenRC) or Arch Linux
+#  (systemd) installation.
 #  Run it as your normal user from the root of the KOX-OS repository:
 #
 #      ./install.sh
 #
 #  The installer is idempotent: existing configuration is backed up, pacman
 #  uses --needed, and every appended shell block is guarded by a marker.
+#  The init system is detected automatically; KOX_INIT=openrc|systemd is a
+#  test override and must still match the detected distro family.
 # =============================================================================
 set -Eeuo pipefail
 
@@ -53,7 +56,7 @@ print_banner() {
   ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝
 BANNER
     printf '%s\n' "$RESET"
-    printf '  %sArtix Linux + Hyprland + OpenRC%s\n' "$DIM" "$RESET"
+    printf '  %s%s%s\n' "$DIM" "${PLATFORM_LABEL:-Linux + Hyprland}" "$RESET"
     printf '  %sThe official KOX OS installer%s\n' "$DIM" "$RESET"
 }
 
@@ -78,6 +81,12 @@ WALLPAPER_DIR="$TARGET_HOME/Pictures/Wallpapers"
 BACKUP_DIR=""
 KOX_USER_NAME=""
 SUDO_KEEPALIVE_PID=""
+PLATFORM_LABEL=""
+DISTRO_ID=""
+DISTRO_LIKE=""
+DISTRO_FAMILY=""
+INIT_SYSTEM=""
+SYSTEMD_RUNNING=0
 
 PATH_BEGIN="# >>> KOX OS PATH >>>"
 PATH_END="# <<< KOX OS PATH <<<"
@@ -88,13 +97,17 @@ AUTOLOGIN_END="# <<< KOX OS autologin <<<"
 # Packages
 #
 # Notes:
-#   - Artix splits OpenRC init scripts into *-openrc packages.
+#   - Artix splits OpenRC init scripts into *-openrc packages; Arch gets the
+#     units from the main packages and uses systemd-logind instead of elogind.
 #   - pipewire-pulse has no OpenRC user service here; KOX starts it at session
-#     login through kox-pulse-autostart.
-#   - swww and inter-font are intentionally not listed: they are not available
-#     in the configured Artix repositories.
+#     login through kox-pulse-autostart. On systemd the socket units cover it.
+#   - swww and inter-font are intentionally not listed: they are absent from
+#     the configured Artix repositories, and KOX uses hyprpaper and the bundled
+#     font set instead, so the shared list stays portable.
+#   - Every name below is also present in the Arch official repositories
+#     (verified against archlinux.org on 2026-11-24).
 # -----------------------------------------------------------------------------
-PACKAGES=(
+PACKAGES_COMMON=(
     # Compositor and session
     hyprland
     hyprpaper
@@ -114,39 +127,32 @@ PACKAGES=(
     python-cairo
     gtk3
     gtk-layer-shell
+    dconf
 
     # Audio
     pipewire
     pipewire-pulse
     pipewire-alsa
-    pipewire-openrc
     wireplumber
-    wireplumber-openrc
     libpulse
 
     # Networking
     networkmanager
-    networkmanager-openrc
     wpa_supplicant
 
     # Bluetooth
     bluez
     bluez-utils
-    bluez-openrc
     blueman
 
     # Power and hardware
     power-profiles-daemon
-    power-profiles-daemon-openrc
     upower
     udiskie
     brightnessctl
 
     # Session services and portals
     dbus
-    dbus-openrc
-    elogind
-    elogind-openrc
     polkit
     polkit-gnome
     xdg-desktop-portal
@@ -178,6 +184,21 @@ PACKAGES=(
     ttf-nerd-fonts-symbols
     noto-fonts
 )
+
+PACKAGES_OPENRC=(
+    pipewire-openrc
+    wireplumber-openrc
+    networkmanager-openrc
+    bluez-openrc
+    power-profiles-daemon-openrc
+    dbus-openrc
+    elogind
+    elogind-openrc
+)
+
+PACKAGES_SYSTEMD=()
+
+PACKAGES=()
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -232,17 +253,44 @@ check_internet() {
 }
 
 service_enabled() {
+    if [[ "$INIT_SYSTEM" == systemd ]]; then
+        local state root_arg=()
+        (( SYSTEMD_RUNNING )) || root_arg=(--root=/)
+        state="$(systemctl "${root_arg[@]}" is-enabled "$1" 2>/dev/null || true)"
+        [[ "$state" == enabled || "$state" == static ||
+            "$state" == alias || "$state" == indirect ]]
+        return
+    fi
+
     rc-update show 2>/dev/null |
         awk -v svc="$1" '$1 == svc { found = 1 } END { exit(found ? 0 : 1) }'
 }
 
 user_service_enabled() {
+    if [[ "$INIT_SYSTEM" == systemd ]]; then
+        systemctl --user is-enabled --quiet "$1" 2>/dev/null
+        return
+    fi
+
     rc-update --user show 2>/dev/null |
         awk -v svc="$1" '$1 == svc { found = 1 } END { exit(found ? 0 : 1) }'
 }
 
 find_system_service() {
-    local candidate
+    local candidate unit root_arg=()
+    if [[ "$INIT_SYSTEM" == systemd ]]; then
+        (( SYSTEMD_RUNNING )) || root_arg=(--root=/)
+        for candidate in "$@"; do
+            unit="${candidate%.service}.service"
+            if systemctl "${root_arg[@]}" list-unit-files --no-legend --no-pager "$unit" 2>/dev/null |
+                awk -v u="$unit" '$1 == u { found = 1 } END { exit(found ? 0 : 1) }'; then
+                printf '%s\n' "${unit%.service}"
+                return 0
+            fi
+        done
+        return 1
+    fi
+
     for candidate in "$@"; do
         if [[ -x "/etc/init.d/$candidate" ]]; then
             printf '%s\n' "$candidate"
@@ -252,13 +300,23 @@ find_system_service() {
     return 1
 }
 
+enable_system_unit_offline() {
+    # systemd is not PID 1 here (image/chroot provisioning). `--root=/`
+    # writes the wants symlinks without contacting a manager.
+    sudo systemctl --root=/ --no-reload enable "$1"
+}
+
 ensure_system_service() {
     local label="$1"
     shift
     local svc
 
     if ! svc="$(find_system_service "$@")"; then
-        warn "No OpenRC init script found for $label (tried: $*)."
+        if [[ "$INIT_SYSTEM" == systemd ]]; then
+            warn "No systemd unit found for $label (tried: $*)."
+        else
+            warn "No OpenRC init script found for $label (tried: $*)."
+        fi
         return 0
     fi
 
@@ -266,11 +324,42 @@ ensure_system_service() {
         info "$svc is already enabled."
     else
         info "Enabling $svc ..."
-        if sudo rc-update add "$svc" default >/dev/null 2>&1; then
+        if [[ "$INIT_SYSTEM" == systemd ]]; then
+            if (( SYSTEMD_RUNNING )); then
+                if sudo systemctl enable "$svc" >/dev/null 2>&1; then
+                    ok "$svc enabled."
+                else
+                    warn "Could not enable $svc."
+                fi
+            elif enable_system_unit_offline "$svc" >/dev/null 2>&1; then
+                ok "$svc enabled for the next boot."
+            else
+                warn "Could not enable $svc offline."
+            fi
+        elif sudo rc-update add "$svc" default >/dev/null 2>&1; then
             ok "$svc enabled in the default runlevel."
         else
             warn "Could not enable $svc."
         fi
+    fi
+
+    if [[ "$INIT_SYSTEM" == systemd ]] && (( ! SYSTEMD_RUNNING )); then
+        info "Offline install: $svc starts on the next boot."
+        return 0
+    fi
+
+    if [[ "$INIT_SYSTEM" == systemd ]]; then
+        if systemctl is-active --quiet "$svc"; then
+            ok "$svc is already running."
+        else
+            info "Starting $svc ..."
+            if sudo systemctl start "$svc" >/dev/null 2>&1; then
+                ok "$svc started."
+            else
+                warn "Could not start $svc. Check: sudo systemctl status $svc"
+            fi
+        fi
+        return 0
     fi
 
     if sudo rc-service "$svc" status >/dev/null 2>&1; then
@@ -288,6 +377,36 @@ ensure_system_service() {
 ensure_user_service() {
     local svc="$1"
     local label="${2:-$1}"
+
+    if [[ "$INIT_SYSTEM" == systemd ]]; then
+        if (( ! SYSTEMD_RUNNING )); then
+            info "Offline install: $label starts with the first Hyprland login via kox-pulse-autostart."
+            return 0
+        fi
+
+        if user_service_enabled "$svc"; then
+            info "$label user unit is already enabled."
+        else
+            info "Enabling $label user unit ..."
+            if systemctl --user enable "$svc" >/dev/null 2>&1; then
+                ok "$label user unit enabled."
+            else
+                warn "Could not enable the $label user unit."
+            fi
+        fi
+
+        if systemctl --user is-active --quiet "$svc"; then
+            ok "$label user unit is already running."
+        else
+            info "Starting $label user unit ..."
+            if systemctl --user start "$svc" >/dev/null 2>&1; then
+                ok "$label user unit started."
+            else
+                warn "Could not start the $label user unit. Check: systemctl --user status $svc"
+            fi
+        fi
+        return 0
+    fi
 
     if [[ ! -x "/etc/user/init.d/$svc" ]]; then
         warn "No OpenRC user service found for $label ($svc)."
@@ -318,6 +437,81 @@ ensure_user_service() {
 }
 
 # -----------------------------------------------------------------------------
+# Platform detection
+#
+# KOX ships one tree that runs on the Artix/OpenRC development box and on the
+# Arch/systemd SATA machine. Detect the init system instead of assuming either:
+# running from an Arch ISO or a chroot has systemd installed but not PID 1, so
+# service setup has an explicit offline path.
+# -----------------------------------------------------------------------------
+detect_platform() {
+    [[ -r /etc/os-release ]] || die "Cannot read /etc/os-release."
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    DISTRO_ID="${ID:-}"
+    DISTRO_LIKE="${ID_LIKE:-}"
+
+    case "${DISTRO_ID} ${DISTRO_LIKE}" in
+        *artix*) DISTRO_FAMILY=artix ;;
+        *arch*)  DISTRO_FAMILY=arch ;;
+        *)
+            die "KOX OS supports Artix Linux (OpenRC) and Arch Linux (systemd); detected: ${PRETTY_NAME:-unknown}."
+            ;;
+    esac
+
+    case "${KOX_INIT:-auto}" in
+        auto)
+            if [[ -d /run/systemd/system ]]; then
+                INIT_SYSTEM=systemd
+            elif command -v rc-update >/dev/null 2>&1 &&
+                command -v rc-service >/dev/null 2>&1; then
+                INIT_SYSTEM=openrc
+            elif command -v systemctl >/dev/null 2>&1; then
+                INIT_SYSTEM=systemd
+            else
+                die "Could not determine the init system (neither OpenRC nor systemd found)."
+            fi
+            ;;
+        openrc|systemd)
+            INIT_SYSTEM="$KOX_INIT"
+            ;;
+        *)
+            die "KOX_INIT must be 'auto', 'openrc' or 'systemd'."
+            ;;
+    esac
+
+    if [[ "$INIT_SYSTEM" == systemd ]]; then
+        command -v systemctl >/dev/null 2>&1 ||
+            die "systemd (systemctl) is required but was not found."
+        SYSTEMD_RUNNING=0
+        [[ -d /run/systemd/system ]] && SYSTEMD_RUNNING=1
+        PLATFORM_LABEL="${PRETTY_NAME:-Arch Linux} + Hyprland + systemd"
+    else
+        command -v rc-update >/dev/null 2>&1 ||
+            die "OpenRC (rc-update) is required but was not found."
+        command -v rc-service >/dev/null 2>&1 ||
+            die "OpenRC (rc-service) is required but was not found."
+        PLATFORM_LABEL="${PRETTY_NAME:-Artix Linux} + Hyprland + OpenRC"
+    fi
+
+    # Each distro keeps the init it ships. A mixed pairing installs a desktop
+    # that looks complete but cannot start its services.
+    if [[ "$DISTRO_FAMILY" == arch && "$INIT_SYSTEM" != systemd ]]; then
+        die "Arch Linux is supported with systemd only (KOX_INIT=$INIT_SYSTEM)."
+    fi
+    if [[ "$DISTRO_FAMILY" == artix && "$INIT_SYSTEM" != openrc ]]; then
+        die "Artix Linux is supported with OpenRC only (KOX_INIT=$INIT_SYSTEM)."
+    fi
+
+    PACKAGES=("${PACKAGES_COMMON[@]}")
+    if [[ "$INIT_SYSTEM" == openrc ]]; then
+        PACKAGES+=("${PACKAGES_OPENRC[@]}")
+    else
+        PACKAGES+=("${PACKAGES_SYSTEMD[@]}")
+    fi
+}
+
+# -----------------------------------------------------------------------------
 # Installer stages
 # -----------------------------------------------------------------------------
 preflight() {
@@ -334,14 +528,9 @@ preflight() {
 
     command -v sudo >/dev/null 2>&1 || die "sudo is required but was not found."
     command -v pacman >/dev/null 2>&1 || die "pacman is required but was not found."
-    command -v rc-update >/dev/null 2>&1 || die "OpenRC (rc-update) is required but was not found."
-    command -v rc-service >/dev/null 2>&1 || die "OpenRC (rc-service) is required but was not found."
 
-    [[ -r /etc/os-release ]] || die "Cannot read /etc/os-release."
-    # shellcheck disable=SC1091
-    . /etc/os-release
-    [[ "${ID:-}" == "artix" ]] || die "KOX OS targets Artix Linux (detected: ${PRETTY_NAME:-unknown})."
-    ok "Artix Linux detected: ${PRETTY_NAME:-Artix Linux}"
+    [[ -n "$INIT_SYSTEM" ]] || die "Platform detection did not run."
+    ok "$PLATFORM_LABEL detected"
 
     [[ -d "$REPO_DIR/.config" ]] || die "Repository is incomplete: missing $REPO_DIR/.config"
     [[ -d "$REPO_DIR/.local" ]] || die "Repository is incomplete: missing $REPO_DIR/.local"
@@ -869,7 +1058,60 @@ configure_shell() {
     ok "Shell configuration complete."
 }
 
+configure_bluez_autoenable() {
+    # BlueZ powers adapters on at boot only when AutoEnable is true; the
+    # packaged file ships it commented. Make it explicit so the Bluetooth
+    # widget is not stuck on "off" after a fresh install.
+    if [[ -f /etc/bluetooth/main.conf ]] &&
+        ! grep -qE '^[[:space:]]*AutoEnable=true' /etc/bluetooth/main.conf; then
+        sudo sed -i 's/^#AutoEnable=true/AutoEnable=true/' /etc/bluetooth/main.conf
+        ok "BlueZ AutoEnable=true."
+    fi
+}
+
 setup_services() {
+    if [[ "$INIT_SYSTEM" == systemd ]]; then
+        step "Enabling systemd system services"
+
+        ensure_system_service "NetworkManager" NetworkManager
+        ensure_system_service "Bluetooth" bluetooth
+        ensure_system_service "Power Profiles Daemon" power-profiles-daemon
+        # D-Bus is socket-activated by systemd; there is no unit to enable.
+
+        if [[ -e /etc/systemd/system/multi-user.target.wants/connman.service ]]; then
+            info "Disabling connman (NetworkManager owns the network stack) ..."
+            if (( SYSTEMD_RUNNING )); then
+                sudo systemctl disable --now connman >/dev/null 2>&1 || true
+            else
+                sudo systemctl --root=/ disable connman >/dev/null 2>&1 || true
+            fi
+            ok "connman disabled."
+        fi
+
+        configure_bluez_autoenable
+
+        step "Enabling PipeWire user services"
+
+        export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+        if [[ ! -d "$XDG_RUNTIME_DIR" ]]; then
+            info "Creating $XDG_RUNTIME_DIR ..."
+            if sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" "$XDG_RUNTIME_DIR"; then
+                ok "Created $XDG_RUNTIME_DIR."
+            else
+                warn "Could not create $XDG_RUNTIME_DIR; user services may fail."
+            fi
+        fi
+
+        if (( SYSTEMD_RUNNING )); then
+            ensure_user_service pipewire.socket "PipeWire socket"
+            ensure_user_service pipewire-pulse.socket "PipeWire Pulse socket"
+            ensure_user_service wireplumber.service "WirePlumber"
+        else
+            info "Offline install: PipeWire user units start at the first Hyprland login via kox-pulse-autostart."
+        fi
+        return 0
+    fi
+
     step "Enabling OpenRC system services"
 
     ensure_system_service "D-Bus" dbus
@@ -887,14 +1129,7 @@ setup_services() {
         ok "connmand disabled."
     fi
 
-    # BlueZ powers adapters on at boot only when AutoEnable is true; the
-    # packaged file ships it commented. Make it explicit so the Bluetooth
-    # widget is not stuck on "off" after a fresh install.
-    if [[ -f /etc/bluetooth/main.conf ]] &&
-        ! grep -qE '^[[:space:]]*AutoEnable=true' /etc/bluetooth/main.conf; then
-        sudo sed -i 's/^#AutoEnable=true/AutoEnable=true/' /etc/bluetooth/main.conf
-        ok "BlueZ AutoEnable=true."
-    fi
+    configure_bluez_autoenable
 
     step "Enabling PipeWire user services"
 
@@ -1021,6 +1256,7 @@ print_final() {
 }
 
 main() {
+    detect_platform
     print_banner
     preflight
     start_sudo_keepalive
@@ -1040,4 +1276,7 @@ main() {
     print_final
 }
 
-main "$@"
+# Allow the test suite to source the helpers without running the installer.
+if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
+    main "$@"
+fi

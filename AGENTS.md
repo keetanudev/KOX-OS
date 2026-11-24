@@ -26,7 +26,7 @@ kox doctor
 
 ## 1. What KOX OS is
 
-KOX OS is an independently maintained, lightweight, modular Linux desktop built on **Artix Linux (OpenRC)** and **Hyprland**. It deliberately avoids systemd and monolithic desktop shells in favour of a component-driven stack:
+KOX OS is an independently maintained, lightweight, modular Linux desktop built on **Hyprland**, with two supported bases: **Artix Linux (OpenRC)** on the NVMe development box and **Arch Linux (systemd)** on the SATA machine. The shared desktop deliberately avoids monolithic shells in favour of a component-driven stack:
 
 - **Hyprland** configured entirely in **Lua** (`~/.config/hypr/*.lua`).
 - **Waybar** as a floating “island” bar with a stable centre notch.
@@ -34,6 +34,7 @@ KOX OS is an independently maintained, lightweight, modular Linux desktop built 
 - **GTK3 layer-shell panels** for Wi-Fi, Bluetooth and battery.
 - **`kox-scale`**, a custom UI scaling engine that scales every text surface without touching the compositor.
 - **`kox`**, a single CLI for updates, theme, wallpaper, cursor, scale, lock and doctor.
+- **Dual-init support** — shared scripts detect OpenRC or systemd. The NVMe stays systemd-free; the Arch SATA machine uses systemd units. One repo serves both.
 
 Target: a fast, self-contained, fresh-installable desktop. Idle RAM budget: **≤ 900 MB**.
 
@@ -61,7 +62,7 @@ Target: a fast, self-contained, fresh-installable desktop. Idle RAM budget: **�
 | UI scale | `10` |
 | Baseline bind count | 115 |
 
-The **SATA machine** (`artix`) is being wiped for a separate Arch install. KOX OS continues on the NVMe. The SATA’s last KOX state (`materia`, `#2ec4b6`) is archived under `~/Documents/KOX-OS/sata-state-2026-11-24/`; do not copy it over the NVMe’s current look.
+The **SATA machine** (`archest`, Arch Linux + systemd, `/dev/sda`) is the dual-init port target: Arch was installed on 2026-11-24 and KOX is deployed from this same repo. The NVMe remains the Artix/OpenRC development box. The SATA’s previous Artix KOX state (`materia`, `#2ec4b6`) is archived under `~/Documents/KOX-OS/sata-state-2026-11-24/`; do not copy it over the NVMe’s current look.
 
 ### Fonts
 
@@ -73,7 +74,7 @@ The lockscreen uses the Nothing dot-matrix face (Ndot 57) and other proprietary 
 
 These are hard constraints. Breaking one is a regression even if the feature “works”.
 
-1. **No systemd.** Use OpenRC system services and `rc-service --user` for user services. No `systemctl`, no unit files, no journal assumptions.
+1. **Dual init, never mixed.** The NVMe is Artix/OpenRC: use OpenRC services and `rc-service --user`; no systemd units. The SATA is Arch/systemd: use `systemctl` and its units. Shared scripts must detect the init system (`install.sh` `detect_platform`, `/run/systemd/system`) and must not hard-code either. Never install systemd on the NVMe or OpenRC on the SATA.
 2. **No new polling loops in Waybar.** Prefer native modules, event signals, and the existing watcher state files. The 5-second Wi-Fi/battery/Bluetooth intervals are grandfathered fallbacks, not a pattern to copy.
 3. **The repo is the source of truth.** Edit files in `~/KOX-OS`, then deploy with `kox update` or `install.sh`. A fix that exists only in `~/.config` will be lost on the next update.
 4. **Atomic deployment only.** Never reintroduce `cp -aT --remove-destination` or any deployment that unlinks a watched config path before recreating it. Use `deploy_tree()`.
@@ -127,6 +128,7 @@ KOX-OS/
     ├── kox-panel                 GTK3 layer-shell panels (wifi/bt/battery)
     ├── kox-panel-autostart       guarded panel daemon start
     ├── kox-pulse-autostart       pipewire-pulse guard
+    ├── kox-session-env           D-Bus/systemd session environment publisher
     ├── kox-scale                 UI scale engine
     ├── kox-waybar-autostart      guarded bar start + respawn
     ├── kox-pickers/              kox-theme, kox-wallpaper, kox-cursor, kox-bar, kox-coverflow
@@ -156,7 +158,7 @@ The `cachy-*` scripts are the inherited rice command surface. Keep them working;
 `autostart.lua` runs on `hl.on("hyprland.start", ...)` and starts, in order:
 
 1. `kox-waybar-autostart` (bar first — a barless boot is the worst visible defect)
-2. `dbus-update-activation-environment --all`
+2. `kox-session-env` (dbus activation env, plus `systemctl --user import-environment` on systemd)
 3. `KOX_SCALE_BOOT=1 kox-scale apply`
 4. `kox-bt-watcher`
 5. `kox-pulse-autostart`
@@ -286,7 +288,7 @@ Direct accent-only palettes (`kox theme blue`, `kox theme pink`) use `themes/<na
 9. Clear stale kitty `main.json`
 10. Restore saved theme, wallpaper and cursor
 11. Configure `~/.bash_profile` (PATH + guarded TTY1 `start-hyprland`)
-12. Enable OpenRC services; disable `connmand`; set BlueZ `AutoEnable=true`
+12. Enable the distro's services (OpenRC runlevels or systemd units); disable `connmand` if present; set BlueZ `AutoEnable=true`
 13. Add user to `wheel audio video storage`
 14. Verify appearance deployment
 
@@ -504,8 +506,13 @@ The guard and `kox-scale` share a lock. Do not kill the guard or bypass the lock
 ### Wi-Fi / Bluetooth
 
 ```bash
+# Artix/OpenRC
 rc-service NetworkManager status
 rc-service bluetoothd status
+# Arch/systemd
+systemctl status NetworkManager
+systemctl status bluetooth
+# Both
 rfkill list
 nmcli device status
 bluetoothctl show
@@ -608,5 +615,5 @@ If this file is not auto-loaded, paste this at the start of a session:
 ```text
 You are the lead engineer for KOX OS, working in ~/KOX-OS on the NVMe development machine (Artix Linux OpenRC, Hyprland Lua, user ved). Read ~/KOX-OS/AGENTS.md in full before doing anything. It contains the architecture, hard constraints, state files, deployment rules, testing matrix and recovery playbook.
 
-Rules: edit the repo, never only the live config; never use cp -aT --remove-destination; preserve live-only state (theme, accent, wallpaper, cursor, ui-scale); keep the rescue bind contract; no systemd; no new Waybar polling loops; do not reboot or repartition without asking. Verify with bash -n, Hyprland --verify-config, hyprctl reload/configerrors, and kox doctor. Commit atomically and push to origin main. Report exactly what changed, what you verified, and what still needs a boot.
+Rules: edit the repo, never only the live config; never use cp -aT --remove-destination; preserve live-only state (theme, accent, wallpaper, cursor, ui-scale); keep the rescue bind contract; dual init — OpenRC on the NVMe, systemd on the Arch SATA machine, detect instead of hard-coding; no new Waybar polling loops; do not reboot or repartition without asking. Verify with bash -n, Hyprland --verify-config, hyprctl reload/configerrors, and kox doctor. Commit atomically and push to origin main. Report exactly what changed, what you verified, and what still needs a boot.
 ```

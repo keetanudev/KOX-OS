@@ -1,13 +1,31 @@
 #!/usr/bin/env bash
 # KOX OS - pipewire-pulse autostart guard.
-# pipewire + wireplumber run as OpenRC user services (rc-status --user);
+#
+# OpenRC: pipewire + wireplumber run as user services (rc-status --user);
 # only the PulseAudio compatibility socket is missing from that tree, so it
-# starts here with the session. Guarded: a second instance would just fail
-# to bind the pulse socket and spam the log.
+# starts here with the session.
+# systemd: the packaged socket units are the supported entry point. Start
+# them for this session in case the user manager has not already done so.
+# Either path is idempotent: a second instance detects the socket/process and
+# exits instead of fighting for the pulse socket.
 set -u
+
+if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
+    systemctl --user start pipewire.socket pipewire-pulse.socket >/dev/null 2>&1 || true
+    systemctl --user start wireplumber.service >/dev/null 2>&1 || true
+
+    if systemctl --user is-active --quiet pipewire-pulse.socket 2>/dev/null ||
+        systemctl --user is-active --quiet pipewire-pulse.service 2>/dev/null ||
+        pgrep -x pipewire-pulse >/dev/null 2>&1; then
+        exit 0
+    fi
+    # Fall through: no reachable user manager or the units are missing.
+fi
+
 if pgrep -x pipewire-pulse >/dev/null 2>&1; then
     exit 0
 fi
+
 # Wait for the pipewire core socket (user service may still be coming up).
 runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 for _ in 1 2 3 4 5 6 7 8 9 10; do

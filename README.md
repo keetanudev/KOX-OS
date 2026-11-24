@@ -1,6 +1,6 @@
 # KOX OS
 
-KOX OS is a lightweight, independently developed Linux desktop platform built on Artix Linux (OpenRC) and Hyprland. Designed as a faster, more modular alternative to other distros, KOX OS strips away monolithic shells and systemd dependencies in favor of a bespoke, component-driven architecture: a Lua-scripted Hyprland session, a floating island bar, interactive GTK system panels, and a proprietary **kox-scale** engine that delivers instant, fluid UI scaling with absolutely zero compositor lag.
+KOX OS is a lightweight, independently developed Linux desktop platform built on Hyprland and available on two bases: **Artix Linux (OpenRC)** and **Arch Linux (systemd)**. Designed as a faster, more modular alternative to other distros, KOX OS strips away monolithic shells in favor of a bespoke, component-driven architecture: a Lua-scripted Hyprland session, a floating island bar, interactive GTK system panels, and a proprietary **kox-scale** engine that delivers instant, fluid UI scaling with absolutely zero compositor lag. One shared tree detects the init system, so the same desktop runs on both bases.
 
 ## Highlights
 
@@ -9,7 +9,7 @@ KOX OS is a lightweight, independently developed Linux desktop platform built on
 - **Nothing-style clock** — the lockscreen clock uses the classic Nothing dot-matrix face (Ndot 57). The fonts are proprietary community rips: install them user-level at `~/.local/share/fonts/` and never commit them.
 - **kox-scale engine** — one integer (9–20) scales every text surface: Waybar, the GTK panels, kitty, fuzzel, mako and generic GTK apps, each through its own warm-reload path (CSS hot-swap, live kitty socket, gsettings) with zero compositor interaction. Every consumer follows the same plain curve (`round(ref × scale / 11)`), and `kox-scale apply` re-applies the stored scale at every boot as a byte-level no-op.
 - **Boot reliability** — every session component starts through a guarded one-shot: the bar is spawned the moment the Wayland socket appears and supervised for its first seconds with instant, bounded respawn (`kox-waybar-autostart`, milestone-logged to `/tmp/kox-waybar.log`), the scale self-heals (its per-boot verdict lands in `$XDG_RUNTIME_DIR/kox-scale-boot.log`), and the Bluetooth watcher publishes a lockstep state file that both bar widgets read, so the clock notch never moves.
-- **Power profiles under OpenRC** — `power-profiles-daemon` via the official OpenRC init script (dbus activation is intentionally inert on Artix), switchable from the battery panel's profile pills.
+- **Power profiles** — `power-profiles-daemon` via the distro's init (OpenRC on Artix, systemd on Arch), switchable from the battery panel's profile pills.
 - **Event-driven volume OSD** — a minimal Nothing-style dot-matrix overlay that appears only when volume or mute *actually* changes (immune to play/pause sink noise) and on Bluetooth audio handover.
 - **Visual pickers** — a Quickshell coverflow (ported rice architecture: env-var IPC in, `/tmp` result file out, fuzzel fallback) for theme, wallpaper and bar style. A theme applies the whole cascade hot: waybar accent, fuzzel, mako, kitty, wallpaper (hyprpaper), Hyprland border and GTK.
 
@@ -35,6 +35,7 @@ KOX-OS/
 │   ├── kox-panel               GTK system panels (wifi / bluetooth / battery daemon)
 │   ├── kox-panel-autostart     guarded panel daemon start
 │   ├── kox-pulse-autostart     pipewire-pulse guard
+│   ├── kox-session-env         D-Bus/systemd session environment publisher
 │   ├── kox-scale               UI scale engine
 │   ├── kox-waybar-autostart    guarded bar start (socket wait + bounded retries)
 │   ├── kox-bt-watcher          shim → kox-widgets/kox-bt-watcher (BT lockstep daemon)
