@@ -1,0 +1,34 @@
+# KOX OS — minimal plymouth boot splash (DRAFT, 2026-11-25)
+#
+# Extracted KOX logo: kox-x.png (ASCII art from the print_banner() block of
+# ~/KOX-OS/install.sh, rendered at 640x240).
+#
+# Review against plymouth 26 script API after installing the plymouth package
+# (pacman -S plymouth); run: sudo plymouthd --show-splash
+#
+# Pulsing loading bar in the OS accent color (#7aa2f7).
+
+[theme]
+name = KOX OS
+
+[script]
+functions = ko_setup, ko_pulse, ko_teardown
+
+[constants]
+# OS accent color (see looknfeel.lua / themes/*.css on the desktop).
+accent = 0x7aa2f7
+# PNG of the KOX logo extracted from install.sh.
+logo = "kox-x.png"
+
+[ko_setup]
+# The logo lives in the centre of the screen; a thin bar below it pulses
+# from empty to full, wrapping at the theme's width.
+Logo = Image (logo = "kox-x.png");
+LoadingBar = ProgressBar (theme_path = ".", height = 6, width = 300,
+                          box_border = false, show_percentage = false);
+
+[ko_pulse]
+LoadingBar.loading = 1 - LoadingBar.loading;
+
+[ko_teardown]
+LoadingBar.loading = 0;
