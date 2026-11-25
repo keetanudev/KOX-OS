@@ -20,8 +20,10 @@ CHOICE="$(printf '%s\n' \
 ACTION="${CHOICE#*   }"
 
 run_loginctl() {
-    if ! loginctl "$@" >/dev/null 2>&1; then
-        notify-send --urgency=critical "Power menu" "Could not run: loginctl $*" 2>/dev/null || true
+    local out rc
+    out="$(loginctl "$@" 2>&1)"; rc=$?
+    if (( rc != 0 )); then
+        notify-send --urgency=critical "Power menu" "Could not run loginctl $*: $out" 2>/dev/null || true
     fi
 }
 
