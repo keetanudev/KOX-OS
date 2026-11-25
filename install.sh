@@ -1020,9 +1020,14 @@ ensure_autologin_block() {
         return 0
     fi
 
-    {
-        printf '\n%s\n' "$AUTOLOGIN_BEGIN"
-        cat <<'EOF'
+    emit_autologin_block >>"$PROFILE_FILE"
+
+    ok "Added guarded TTY1 Hyprland autologin to ~/.bash_profile."
+}
+
+emit_autologin_block() {
+    printf '\n%s\n' "$AUTOLOGIN_BEGIN"
+    cat <<'EOF'
 # KOX OS - start the Wayland session automatically at login.
 # Fires only when: it is a real login on tty1 ($(tty) is /dev/tty1, so
 # terminal emulators and SSH can never trigger this), no Wayland/X display
@@ -1039,10 +1044,26 @@ then
     exec start-hyprland
 fi
 EOF
-        printf '%s\n' "$AUTOLOGIN_END"
-    } >>"$PROFILE_FILE"
+    printf '%s\n' "$AUTOLOGIN_END"
+}
 
-    ok "Added guarded TTY1 Hyprland autologin to ~/.bash_profile."
+configure_zsh_autologin() {
+    # CachyOS and other Arch spins default to zsh as the login shell. The
+    # guarded block goes into ~/.zprofile so it is actually read at login;
+    # the ~/.bash_profile copy alone never runs for these users.
+    local login_shell
+    login_shell="$(getent passwd "$TARGET_USER" | cut -d: -f7 2>/dev/null || true)"
+    [[ "$login_shell" == "zsh" ]] || return 0
+
+    local zp="$TARGET_HOME/.zprofile"
+    if [[ -f "$zp" ]] && grep -qF "$AUTOLOGIN_BEGIN" "$zp"; then
+        return 0
+    fi
+    if [[ ! -f "$zp" ]]; then
+        printf '%s\n' '# KOX OS - zprofile written by install.sh.' > "$zp"
+    fi
+    emit_autologin_block >>"$zp"
+    ok "Added guarded TTY1 Hyprland autologin to ~/.zprofile (login shell is zsh)."
 }
 
 configure_shell() {
@@ -1055,6 +1076,7 @@ configure_shell() {
 
     ensure_path_block
     ensure_autologin_block
+    configure_zsh_autologin
 
     ok "Shell configuration complete."
 }
