@@ -47,3 +47,37 @@ hl.config({
         },
     },
 })
+
+-- Shared motion language: OutExpo for small layer surfaces and OutCubic for
+-- window/workspace movement. Hyprland speed 2 is approximately 200 ms.
+hl.curve("koxOutExpo", {
+    type = "bezier",
+    points = { { 0.16, 1.0 }, { 0.3, 1.0 } },
+})
+hl.curve("koxOutCubic", {
+    type = "bezier",
+    points = { { 0.215, 0.61 }, { 0.355, 1.0 } },
+})
+
+for _, leaf in ipairs({ "windows", "windowsIn", "windowsOut", "workspaces" }) do
+    hl.animation({
+        leaf = leaf,
+        enabled = true,
+        speed = 2,
+        bezier = "koxOutCubic",
+        style = "slide",
+    })
+end
+
+-- Layer surfaces include Fuzzel and Mako. The effect itself is Hyprland's
+-- fade; its timing and curve come from the shared layer animation leaf.
+for _, namespace in ipairs({ "fuzzel", "mako" }) do
+    hl.layer_rule({ match = { namespace = namespace }, animation = "fade" })
+end
+hl.animation({
+    leaf = "layers",
+    enabled = true,
+    speed = 2,
+    bezier = "koxOutExpo",
+    style = "fade",
+})

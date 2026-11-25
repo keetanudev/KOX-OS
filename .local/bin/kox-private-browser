@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Open a private browser window using the configured browser default.
+set -euo pipefail
+config="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/defaults.lua"
+browser="firefox"
+if [[ -r "$config" ]]; then
+    configured="$(sed -nE 's/^[[:space:]]*browser[[:space:]]*=[[:space:]]*"([A-Za-z0-9._+-]+)"[,}]?[[:space:]]*$/\1/p' "$config" | head -n1)"
+    [[ -z "$configured" ]] || browser="$configured"
+fi
+if command -v "$browser" >/dev/null 2>&1; then
+    case "${browser,,}" in
+        firefox|firefox-esr) exec "$browser" --private-window https:// ;;
+        chromium|chromium-browser|brave|brave-browser|brave-origin|google-chrome|google-chrome-stable)
+            exec "$browser" --incognito https:// ;;
+        *) exec xdg-open https:// ;;
+    esac
+fi
+exec xdg-open https://

@@ -128,30 +128,30 @@ Scope {
         target: root
         property: "veilOpacity"
         to: 1
-        duration: 300
+        duration: 200
         easing.type: Easing.OutCubic
     }
 
     // engage the session lock once the veil has covered the screen
     Timer {
         id: engageTimer
-        interval: 330
+        interval: 220
         onTriggered: if (!root.dryRun) lock.locked = true
     }
 
     // ── entrance: clock blooms in, then date, then pill ──
     SequentialAnimation {
         id: enterFx
-        PauseAnimation { duration: 90 }
+        PauseAnimation { duration: 0 }
         ParallelAnimation {
-            NumberAnimation { target: root; property: "uiClock"; to: 1; duration: 430; easing.type: Easing.OutCubic }
+            NumberAnimation { target: root; property: "uiClock"; to: 1; duration: 200; easing.type: Easing.OutCubic }
             SequentialAnimation {
-                PauseAnimation { duration: 120 }
-                NumberAnimation { target: root; property: "uiDate"; to: 1; duration: 380; easing.type: Easing.OutCubic }
+                PauseAnimation { duration: 40 }
+                NumberAnimation { target: root; property: "uiDate"; to: 1; duration: 200; easing.type: Easing.OutCubic }
             }
             SequentialAnimation {
-                PauseAnimation { duration: 200 }
-                NumberAnimation { target: root; property: "uiPill"; to: 1; duration: 380; easing.type: Easing.OutCubic }
+                PauseAnimation { duration: 80 }
+                NumberAnimation { target: root; property: "uiPill"; to: 1; duration: 200; easing.type: Easing.OutCubic }
             }
         }
     }
@@ -160,9 +160,9 @@ Scope {
     SequentialAnimation {
         id: exitFx
         ParallelAnimation {
-            NumberAnimation { target: root; property: "uiClock"; to: 0; duration: 160; easing.type: Easing.InQuad }
-            NumberAnimation { target: root; property: "uiDate"; to: 0; duration: 160; easing.type: Easing.InQuad }
-            NumberAnimation { target: root; property: "uiPill"; to: 0; duration: 160; easing.type: Easing.InQuad }
+            NumberAnimation { target: root; property: "uiClock"; to: 0; duration: 180; easing.type: Easing.OutCubic }
+            NumberAnimation { target: root; property: "uiDate"; to: 0; duration: 180; easing.type: Easing.OutCubic }
+            NumberAnimation { target: root; property: "uiPill"; to: 0; duration: 180; easing.type: Easing.OutCubic }
         }
         ScriptAction {
             script: {

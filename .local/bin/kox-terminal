@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Launch the configured terminal, falling back across common Wayland terminals.
+set -euo pipefail
+config="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/defaults.lua"
+preferred=""
+if [[ -r "$config" ]]; then
+    preferred="$(sed -nE 's/^[[:space:]]*terminal[[:space:]]*=[[:space:]]*"([A-Za-z0-9._+-]+)"[,}]?[[:space:]]*$/\1/p' "$config" | head -n1)"
+fi
+for candidate in "$preferred" kitty foot alacritty; do
+    [[ -n "$candidate" ]] || continue
+    if command -v "$candidate" >/dev/null 2>&1; then
+        exec "$candidate" "$@"
+    fi
+done
+printf 'kox-terminal: install a terminal (kitty, foot, or alacritty) or set one with `kox default terminal APP`\n' >&2
+exit 127

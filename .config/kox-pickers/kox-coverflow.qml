@@ -28,7 +28,7 @@ ShellRoot {
   property bool testCancel: (Quickshell.env("KOX_CF_TESTCANCEL") || "0") === "1"
 
   // One animation language for the whole picker.
-  property int animDur: 220
+  property int animDur: 200
   property int animEase: Easing.OutCubic
 
   property var dots: [
