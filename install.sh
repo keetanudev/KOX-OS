@@ -2,8 +2,8 @@
 # =============================================================================
 #  KOX OS installer
 #
-#  Deploys the KOX OS desktop on a fresh Artix Linux (OpenRC) or Arch Linux
-#  (systemd) installation.
+#  Deploys the KOX OS desktop on a fresh Artix Linux (OpenRC), Arch Linux
+#  (systemd) or CachyOS (systemd) installation.
 #  Run it as your normal user from the root of the KOX-OS repository:
 #
 #      ./install.sh
@@ -451,9 +451,10 @@ detect_platform() {
     DISTRO_ID="${ID:-}"
     DISTRO_LIKE="${ID_LIKE:-}"
 
+    # CachyOS sets ID=cachyos with ID_LIKE=arch; match both defensively.
     case "${DISTRO_ID} ${DISTRO_LIKE}" in
         *artix*) DISTRO_FAMILY=artix ;;
-        *arch*)  DISTRO_FAMILY=arch ;;
+        *arch*|*cachyos*) DISTRO_FAMILY=arch ;;
         *)
             die "KOX OS supports Artix Linux (OpenRC) and Arch Linux (systemd); detected: ${PRETTY_NAME:-unknown}."
             ;;
@@ -497,7 +498,7 @@ detect_platform() {
     # Each distro keeps the init it ships. A mixed pairing installs a desktop
     # that looks complete but cannot start its services.
     if [[ "$DISTRO_FAMILY" == arch && "$INIT_SYSTEM" != systemd ]]; then
-        die "Arch Linux is supported with systemd only (KOX_INIT=$INIT_SYSTEM)."
+        die "Arch Linux and CachyOS are supported with systemd only (KOX_INIT=$INIT_SYSTEM)."
     fi
     if [[ "$DISTRO_FAMILY" == artix && "$INIT_SYSTEM" != openrc ]]; then
         die "Artix Linux is supported with OpenRC only (KOX_INIT=$INIT_SYSTEM)."
