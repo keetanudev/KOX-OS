@@ -1,0 +1,42 @@
+# bash completion for the kox command center (KOX OS).
+# Word lists are static; update alongside the command list in .local/bin/kox.
+_kox() {
+    local cur prev command
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    command="${COMP_WORDS[1]:-}"
+
+    case "$COMP_CWORD" in
+        1)
+            COMPREPLY=( $(compgen -W "update scale lock doctor default theme wallpaper bar cursor help" -- "$cur") )
+            return 0
+            ;;
+        2)
+            case "$command" in
+                scale)
+                    COMPREPLY=( $(compgen -W "9 10 11 12 13 14 15 16 17 18 19 20 current reset apply" -- "$cur") )
+                    return 0
+                    ;;
+                theme)
+                    COMPREPLY=( $(compgen -W "cachy-dark dracula emerald arctic-light ant-dracula nordic orchis materia catppuccin tokyonight everforest blue pink" -- "$cur") )
+                    return 0
+                    ;;
+                default)
+                    COMPREPLY=( $(compgen -W "browser terminal fileManager editor" -- "$cur") )
+                    return 0
+                    ;;
+            esac
+            return 0
+            ;;
+        3)
+            # kox default <role> <target>: common application names.
+            if [[ "$command" == default && "${COMP_WORDS[2]:-}" =~ ^(browser|terminal|fileManager|editor)$ ]]; then
+                COMPREPLY=( $(compgen -W "firefox firefox-esr chromium chromium-browser google-chrome google-chrome-stable brave-browser nautilus micro vim nano" -- "$cur") )
+                return 0
+            fi
+            return 0
+            ;;
+    esac
+}
+
+complete -F _kox kox
