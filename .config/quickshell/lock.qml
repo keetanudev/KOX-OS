@@ -33,6 +33,7 @@
 import QtQuick
 import QtQuick.Controls.Basic
 import Quickshell
+import Quickshell.Io
 import Quickshell.Wayland
 import Quickshell.Services.Pam
 
@@ -40,6 +41,21 @@ Scope {
     id: root
 
     readonly property bool dryRun: Quickshell.env("KOX_LOCK_DRY") === "1"
+    property color accentColor: "#ff79c6"
+
+    function readAccent(css) {
+        const match = /@define-color\s+accent_color\s+(#[0-9a-fA-F]{6,8})\s*;/.exec(css)
+        if (match)
+            root.accentColor = match[1]
+    }
+
+    FileView {
+        id: accentFile
+        path: Quickshell.env("HOME") + "/.config/waybar/theme-accent.css"
+        watchChanges: true
+        onLoaded: root.readAccent(this.text())
+        onFileChanged: this.reload()
+    }
 
     signal unlocked()
     signal failed()
@@ -118,7 +134,7 @@ Scope {
 
         Rectangle {
             anchors.fill: parent
-            color: "#0c0e12"
+            color: "#f2191b20"
             opacity: root.veilOpacity
         }
     }
@@ -199,7 +215,7 @@ Scope {
 
         Rectangle {
             anchors.fill: parent
-            color: "#0c0e12"
+            color: "#f2191b20"
 
             Component.onCompleted: {
                 enterFx.restart()
@@ -228,15 +244,12 @@ Scope {
                 anchors.centerIn: parent
                 spacing: 24
 
-                // ── clock: Nothing OS dot-matrix face, big hours ──
+                // ── clock: large, soft-white JetBrains Mono hours ──
                 Text {
                     id: clock
                     anchors.horizontalCenter: parent.horizontalCenter
                     textFormat: Text.RichText
-                    // Ndot 57 — Nothing's classic dot-matrix typeface
-                    // (nothing.tech). Proprietary (community-ripped);
-                    // installed locally — NEVER commit the binary.
-                    font.family: "Ndot 57"
+                    font.family: "JetBrainsMono Nerd Font"
                     opacity: root.uiClock
                     transform: Translate { y: (1 - root.uiClock) * 14 }
                     property var now: new Date()
@@ -258,7 +271,7 @@ Scope {
                     font.family: "JetBrainsMono Nerd Font"
                     font.pixelSize: 13
                     font.letterSpacing: 3
-                    color: "#8f959e"
+                    color: "#f8f8f2"
                     opacity: root.uiDate
                     transform: Translate { y: (1 - root.uiDate) * 10 }
                     text: Qt.formatDateTime(clock.now, "dddd · MMMM d").toString().toUpperCase()
@@ -275,15 +288,15 @@ Scope {
 
                     Rectangle {
                         anchors.fill: parent
-                        radius: 27
+                        radius: 8
                         color: Qt.rgba(1, 1, 1, 0.055)
-                        border.color: Qt.rgba(1, 1, 1, 0.10)
+                        border.color: Qt.rgba(root.accentColor.r, root.accentColor.g, root.accentColor.b, 0.55)
                         border.width: 1
                     }
                     // failure flash overlay (opacity animated by failFx)
                     Rectangle {
                         anchors.fill: parent
-                        radius: 27
+                        radius: 8
                         color: "transparent"
                         border.color: "#ff6b6b"
                         border.width: 1.5
@@ -299,7 +312,7 @@ Scope {
                             text: "\uF023"
                             font.family: "JetBrainsMono Nerd Font"
                             font.pixelSize: 17
-                            color: root.unlockInProgress ? "#8f959e" : "#e6e7e9"
+                            color: root.unlockInProgress ? "#8f959e" : root.accentColor
                             anchors.verticalCenter: parent.verticalCenter
                         }
 
@@ -344,6 +357,9 @@ Scope {
 
         // One surface per connected monitor, created automatically.
         WlSessionLockSurface {
+            id: lockSurface
+            color: "transparent"
+            BackgroundEffect.blurRegion: Region { item: lockSurface.contentItem }
             Loader {
                 anchors.fill: parent
                 sourceComponent: lockUi
@@ -359,7 +375,7 @@ Scope {
         title: "KOX lock check"
         width: 480
         height: 700
-        color: "#0c0e12"
+        color: "#f2191b20"
         flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
 
         Loader {

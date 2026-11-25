@@ -1,9 +1,9 @@
-font=Inter 10
-background-color=#1c1e27f2
+font=JetBrainsMono Nerd Font 10
+background-color=#191b20f2
 text-color=#f8f8f2
 border-color=#2ec4b6
 border-size=1
-border-radius=8
+border-radius=12
 padding=10
 margin=8
 max-visible=4
