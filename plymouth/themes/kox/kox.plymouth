@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=KOX OS
+Description=KOX OS boot splash — centered logo + pulsing accent bar (#7aa2f7)
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/kox
+ScriptFile=/usr/share/plymouth/themes/kox/kox.script

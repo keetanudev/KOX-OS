@@ -1,0 +1,68 @@
+// kox.script — KOX OS plymouth `script`-module theme.
+// Centered PNG logo + a thin accent bar (#7aa2f7) that pulses. Verify on a
+// spare VT with `sudo plymouthd --debug --tty=tty3` + `sudo plymouth show-splash`.
+// Colors are 0.0-1.0 floats. Sprite z: logo=10, bar=11.
+
+// ---- OS accent + background -------------------------------------------
+ACCENT_R = 0x7a / 255;      // KOX tokyonight blue #7aa2f7
+ACCENT_G = 0xa2 / 255;
+ACCENT_B = 0xf7 / 255;
+
+BG_R = 0.090;               // KOX dark #17161e
+BG_G = 0.086;
+BG_B = 0.118;
+
+// ---- screen background (guarantees not-black even if images fail) -----
+Window.SetBackgroundTopColor(BG_R, BG_G, BG_B);
+Window.SetBackgroundBottomColor(BG_R, BG_G, BG_B);
+
+// ---- assets (must exist in ImageDir; missing file -> blank sprite) -----
+logo_img = Image("kox-x.png");
+bar_img  = Image("kox-bar.png");
+
+logo_sprite = Sprite(logo_img);
+logo_sprite.SetZ(10);
+logo_sprite.SetOpacity(1.0);
+
+bar_sprite = Sprite(bar_img);
+bar_sprite.SetZ(11);
+bar_sprite.SetOpacity(1.0);
+
+// ---- geometry ----------------------------------------------------------
+screen_w = Window.GetWidth();
+screen_h = Window.GetHeight();
+logo_w   = logo_img.GetWidth();
+logo_h   = logo_img.GetHeight();
+bar_w    = bar_img.GetWidth();
+
+tick = 0;
+
+recenter() {
+    logo_sprite.SetPosition(screen_w / 2 - logo_w / 2,
+                            screen_h / 2 - logo_h / 2, 10);
+    bar_sprite.SetPosition(screen_w / 2 - bar_w / 2,
+                           screen_h / 2 + logo_h / 2 + 24, 11);
+}
+
+recenter();
+
+// ---- animation: ~50 Hz refresh; sinusoidal pulse ~1.5 s ----------------
+fun_refresh() {
+    tick = tick + 1;
+    pulse = 0.45 + 0.55 * Math.Abs(Math.Sin(tick * Math.PI / 75));
+    bar_sprite.SetOpacity(pulse);
+    // re-center every frame so a resolution/mode change can't hide the logo
+    screen_w = Window.GetWidth();
+    screen_h = Window.GetHeight();
+    recenter();
+}
+
+Plymouth.SetRefreshFunction(fun_refresh);
+
+// ---- optional lifecycle hooks (no-ops; keep theme from breaking) -------
+fun_show_splash() { }
+fun_hide_splash() { }
+fun_quit()        { }
+Plymouth.SetShowSplashFunction(fun_show_splash);
+Plymouth.SetHideSplashFunction(fun_hide_splash);
+Plymouth.SetQuitFunction(fun_quit);
