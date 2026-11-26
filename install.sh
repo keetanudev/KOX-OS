@@ -788,6 +788,10 @@ deploy_dotfiles() {
 
     mkdir -p "$TARGET_HOME/.config" "$TARGET_HOME/.local/bin"
 
+    # Stop any running panel before replacing configs/scripts it reads, so
+    # there is never a reader racing a half-updated file ("widget jitter").
+    pkill -f kox-panel 2>/dev/null || true
+
     info "Installing ~/.config ..."
     # defaults.lua is user-selected state, so keep an existing choice when
     # deploying the repository's first-run defaults.
@@ -815,6 +819,11 @@ deploy_dotfiles() {
 
     info "Installing ~/.local ..."
     deploy_tree "$REPO_DIR/.local" "$TARGET_HOME/.local" "~/.local"
+
+    # Bring the panel back up once the new files are in place; the pkill
+    # above guarantees exactly one daemon instance (no duplicates/second bar).
+    # Backgrounded and output-silenced; never fails the install.
+    "$TARGET_HOME/.local/bin/kox-panel" --daemon >/dev/null 2>&1 &
 
     ok "Dotfiles deployed to $TARGET_HOME"
 
