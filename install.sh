@@ -112,7 +112,6 @@ PACKAGES_COMMON=(
     hyprland
     hyprpaper
     hyprlock
-    plymouth
     xorg-xwayland
 
     # Desktop shell
