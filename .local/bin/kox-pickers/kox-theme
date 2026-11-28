@@ -180,6 +180,7 @@ apply_spec() { # $1 = spec line
   local acc="${accent#\#}"
   [[ -f "$HOME/.config/fuzzel/fuzzel.ini" ]] && sed -i -E \
     -e "s/^prompt[[:space:]]*=[[:space:]]*[0-9a-fA-F]{6,8}$/prompt=${acc}ff/" \
+    -e "s/^match[[:space:]]*=[[:space:]]*[0-9a-fA-F]{6,8}$/match=${acc}ff/" \
     -e "s/^selection[[:space:]]*=[[:space:]]*[0-9a-fA-F]{6,8}$/selection=${acc}d9/" \
     "$HOME/.config/fuzzel/fuzzel.ini"
 

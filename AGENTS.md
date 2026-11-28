@@ -261,7 +261,7 @@ Direct accent-only palettes (`kox theme blue`, `kox theme pink`) use `themes/<na
 
 | Command | Behaviour |
 | --- | --- |
-| `kox update` | `sudo pacman -Syu --noconfirm`, `git pull --ff-only`, then `exec bash install.sh` with `KOX_ASSUME_DEFAULTS=1` |
+| `kox update` | detect the distro, check out `main` (Artix) or `arch-port` (Arch/CachyOS), `sudo pacman -Syu --noconfirm`, `git pull --ff-only origin <branch>`, then `exec bash install.sh` with `KOX_ASSUME_DEFAULTS=1` |
 | `kox theme [name]` | coverflow picker, or apply a named theme |
 | `kox wallpaper [path]` | coverflow wallpaper picker |
 | `kox cursor` | cursor picker |
@@ -271,7 +271,7 @@ Direct accent-only palettes (`kox theme blue`, `kox theme pink`) use `themes/<na
 | `kox doctor` | PipeWire, Bluetooth, Waybar and privilege checks |
 | `kox help` | command reference |
 
-`kox update` validates before touching the system: git present, sudo present, repo present, worktree clean, `install.sh` present. A failed package update stops before the dotfile pull.
+`kox update` validates before touching the system: git, sudo and pacman present, repo present, `install.sh` present, a known distro (`detect_distro`), and a clean worktree (`git status --porcelain`, including untracked files). It then selects the branch — `main` on Artix, `arch-port` on Arch/CachyOS — before any package or git operation; an unknown distro or a dirty tree aborts without pulling. A failed package update stops before the dotfile pull.
 
 ### 5.8 Installer and deployment
 
@@ -341,7 +341,7 @@ git status -sb          # must be clean
 kox update
 ```
 
-`kox update` runs `pacman -Syu`, pulls `main` fast-forward, then runs the installer with defaults assumed. The installer deploys the repo over the live config using `deploy_tree()`, restores the saved appearance, and reloads Hyprland if a session is running.
+`kox update` detects the distro, checks out the matching branch (`main` on Artix/OpenRC, `arch-port` on Arch/CachyOS/systemd), runs `pacman -Syu`, pulls that branch fast-forward, then runs the installer with defaults assumed. The installer deploys the repo over the live config using `deploy_tree()`, restores the saved appearance, and reloads Hyprland if a session is running.
 
 ### Manual deploy
 
