@@ -7,7 +7,7 @@ border-radius=12
 padding=10
 margin=8
 max-visible=4
-default-timeout=5000
+default-timeout=3000
 layer=overlay
 anchor=top-right
 # Empty output selects the currently focused output (xdg-output aware Mako).
