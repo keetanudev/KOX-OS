@@ -47,3 +47,36 @@ hl.config({
         },
     },
 })
+
+-- Shared motion language: OutExpo for small layer surfaces and softer
+-- OutCubic for window/workspace movement. Speeds are in 100 ms units.
+hl.curve("koxOutExpo", {
+    type = "bezier",
+    points = { { 0.16, 1.0 }, { 0.3, 1.0 } },
+})
+hl.curve("koxOutCubic", {
+    type = "bezier",
+    points = { { 0.05, 0.9 }, { 0.1, 1.0 } },
+})
+
+for _, leaf in ipairs({ "windows", "windowsIn", "windowsOut", "workspaces" }) do
+    hl.animation({
+        leaf = leaf,
+        enabled = true,
+        speed = 2.5,
+        bezier = "koxOutCubic",
+        style = "slide",
+    })
+end
+
+-- Fuzzel fades quickly; Mako slides in from the right and exits the same way.
+-- Layer rules inherit the shared 200 ms speed and OutExpo curve below.
+hl.layer_rule({ match = { namespace = "fuzzel" }, animation = "fade" })
+hl.layer_rule({ match = { namespace = "notifications" }, animation = "slide right" })
+hl.animation({
+    leaf = "layers",
+    enabled = true,
+    speed = 2,
+    bezier = "koxOutExpo",
+    style = "fade",
+})
