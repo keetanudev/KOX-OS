@@ -12,6 +12,12 @@ set -u
 VERSION="0.1.0"
 KOX_REPO="${KOX_REPO:-$HOME/KOX-OS}"
 
+# One tree, two lines: `main` is Artix/OpenRC, `arch-port` is Arch/CachyOS
+# with systemd. `kox update` must pull the branch that matches the running
+# distro; pulling the other one would deploy the wrong service model.
+KOX_BRANCH_ARTIX="main"
+KOX_BRANCH_ARCH="arch-port"
+
 # --- presentation ----------------------------------------------------------
 # Color on a TTY only. KOX_COLOR=always forces it (screenshots, logs);
 # KOX_COLOR=never or NO_COLOR disables it.
@@ -79,6 +85,31 @@ init_system() {
     else
         printf 'openrc\n'
     fi
+}
+
+# --- distribution detection ------------------------------------------------
+# Mirrors install.sh's detect_platform: Artix ships /etc/artix-release, while
+# Arch and CachyOS are identified through /etc/os-release. CachyOS sets
+# ID=cachyos with ID_LIKE=arch, so both fields are matched defensively.
+# Prints "artix" or "arch"; returns non-zero for anything else.
+detect_distro() {
+    if [[ -e /etc/artix-release ]]; then
+        printf 'artix\n'
+        return 0
+    fi
+    [[ -r /etc/os-release ]] || return 1
+
+    local distro
+    distro=$(
+        # shellcheck disable=SC1091
+        . /etc/os-release 2>/dev/null || exit 1
+        case "${ID:-} ${ID_LIKE:-}" in
+            *artix*) printf 'artix\n' ;;
+            *arch*|*cachyos*) printf 'arch\n' ;;
+            *) exit 1 ;;
+        esac
+    ) || return 1
+    printf '%s\n' "$distro"
 }
 
 check_pipewire() {
@@ -295,6 +326,7 @@ cmd_cursor() {
 
 cmd_update() {
     local repo=$KOX_REPO
+    local distro branch dirty
 
     # Validate the whole update path before touching the system: a package
     # update followed by a failed pull would leave the machine half-updated.
@@ -308,21 +340,52 @@ cmd_update() {
             "$RED" "$RESET" >&2
         return 1
     fi
+    if ! command -v pacman >/dev/null 2>&1; then
+        printf '\n  %skox:%s pacman is required for updates.\n' \
+            "$RED" "$RESET" >&2
+        return 1
+    fi
     if [[ ! -d "$repo/.git" ]]; then
         printf '\n  %skox:%s dotfiles repo not found: %s\n' \
             "$RED" "$RESET" "$repo" >&2
         return 1
     fi
-    if ! git -C "$repo" diff --quiet 2>/dev/null ||
-        ! git -C "$repo" diff --cached --quiet 2>/dev/null; then
-        printf '\n  %skox:%s local changes in %s.\n' \
-            "$RED" "$RESET" "$repo" >&2
-        printf '  Commit or stash them before running kox update.\n' >&2
-        return 1
-    fi
     if [[ ! -f "$repo/install.sh" ]]; then
         printf '\n  %skox:%s installer missing from %s.\n' \
             "$RED" "$RESET" "$repo" >&2
+        return 1
+    fi
+
+    # Pick the branch from the running distro before touching the system or
+    # the repository. Pulling the wrong line would deploy OpenRC units on
+    # systemd (or the reverse), so an unknown distro aborts here — with no
+    # packages installed and nothing pulled.
+    if ! distro=$(detect_distro); then
+        printf '\n  %skox:%s could not detect the distribution.\n' \
+            "$RED" "$RESET" >&2
+        printf '  Expected /etc/artix-release (Artix) or an Arch/CachyOS\n' >&2
+        printf '  ID/ID_LIKE in /etc/os-release. Nothing was changed.\n' >&2
+        return 1
+    fi
+    case $distro in
+        artix) branch=$KOX_BRANCH_ARTIX ;;
+        arch) branch=$KOX_BRANCH_ARCH ;;
+        *)
+            printf '\n  %skox:%s unsupported distribution: %s. Nothing was changed.\n' \
+                "$RED" "$RESET" "$distro" >&2
+            return 1
+            ;;
+    esac
+
+    # `status --porcelain` covers staged, unstaged and untracked files. The
+    # checkout would either refuse or silently carry changes across branches,
+    # so stop before the pull to protect uncommitted work.
+    dirty=$(git -C "$repo" status --porcelain 2>/dev/null) || dirty=""
+    if [[ -n $dirty ]]; then
+        printf '\n  %skox:%s local changes in %s.\n' \
+            "$RED" "$RESET" "$repo" >&2
+        printf '  Commit or stash them before running kox update.\n' >&2
+        printf '  No branch was switched and nothing was pulled.\n' >&2
         return 1
     fi
 
@@ -333,8 +396,25 @@ cmd_update() {
         return 1
     fi
 
-    printf '\n  %sUpdating KOX OS Dotfiles...%s\n' "$BOLD$CYAN" "$RESET"
-    if ! git -C "$repo" pull --ff-only; then
+    printf '\n  %sUpdating KOX OS Dotfiles (%s)...%s\n' \
+        "$BOLD$CYAN" "$branch" "$RESET"
+    # A fresh clone of `main` has no local arch-port, so create it from the
+    # remote on first use. Existing branches are switched to untouched.
+    if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
+        if ! git -C "$repo" checkout "$branch"; then
+            printf '\n  %skox:%s could not check out %s.\n' \
+                "$RED" "$RESET" "$branch" >&2
+            return 1
+        fi
+    else
+        if ! git -C "$repo" fetch origin "$branch" ||
+            ! git -C "$repo" checkout -b "$branch" --track "origin/$branch"; then
+            printf '\n  %skox:%s could not create local branch %s from origin.\n' \
+                "$RED" "$RESET" "$branch" >&2
+            return 1
+        fi
+    fi
+    if ! git -C "$repo" pull --ff-only origin "$branch"; then
         printf '\n  %skox:%s dotfiles update failed.\n' \
             "$RED" "$RESET" >&2
         return 1
