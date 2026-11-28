@@ -325,6 +325,80 @@ cmd_cursor() {
     cmd_picker kox-cursor "$@"
 }
 
+# --- animation verification ------------------------------------------------
+# looknfeel.lua owns the shared motion language: 250 ms for windows and
+# workspaces (speed 2.5 in 100 ms units), 200 ms for layers, and the
+# slide-right Mako rule. A running Hyprland keeps the last evaluated values
+# until it reloads, so `kox update` checks the runtime after deployment and
+# forces exactly one reload before warning.
+KOX_ANIM_SPEED="2.5"
+KOX_LAYER_SPEED="2"
+
+animation_speed() { # animation_speed <leaf> — print a leaf's runtime speed
+    hyprctl animations 2>/dev/null | awk -v leaf="$1" '
+        $1 == "name:" { name = $2; next }
+        name == leaf && $1 == "speed:" { print $2; exit }
+    '
+}
+
+speed_matches() { # speed_matches <actual> <expected>
+    awk -v have="${1:-}" -v want="$2" \
+        'BEGIN { exit !(have != "" && have + 0 == want + 0) }'
+}
+
+animations_active() {
+    local leaf
+    for leaf in windows windowsIn windowsOut workspaces; do
+        speed_matches "$(animation_speed "$leaf")" "$KOX_ANIM_SPEED" || return 1
+    done
+    speed_matches "$(animation_speed layers)" "$KOX_LAYER_SPEED" || return 1
+}
+
+verify_animations() {
+    local looknfeel="$HOME/.config/hypr/looknfeel.lua" errors
+
+    if [[ -r $looknfeel ]] &&
+        ! grep -q 'animation = "slide right"' "$looknfeel"; then
+        printf '  %swarning:%s deployed looknfeel.lua is missing the Mako slide-right rule.\n' \
+            "$RED" "$RESET" >&2
+    fi
+
+    if [[ -z ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] ||
+        ! command -v hyprctl >/dev/null 2>&1; then
+        printf '  %sAnimation check skipped: no running Hyprland session.%s\n' \
+            "$DIM" "$RESET"
+        return 0
+    fi
+
+    if animations_active; then
+        printf '  %s✓%s animations: 250 ms windows, 200 ms layers\n' \
+            "$GREEN" "$RESET"
+        return 0
+    fi
+
+    printf '  %sAnimations are stale; reloading Hyprland...%s\n' \
+        "$DIM" "$RESET"
+    hyprctl reload >/dev/null 2>&1 || true
+    sleep 1
+
+    errors=$(hyprctl configerrors 2>/dev/null || true)
+    if [[ -n $errors ]]; then
+        printf '  %swarning:%s Hyprland config errors after reload:\n%s\n' \
+            "$RED" "$RESET" "$errors" >&2
+    fi
+
+    if animations_active; then
+        printf '  %s✓%s animations restored after reload\n' \
+            "$GREEN" "$RESET"
+        return 0
+    fi
+
+    printf '  %swarning:%s animations still do not match (expected %s for windows/workspaces, %s for layers).\n' \
+        "$RED" "$RESET" "$KOX_ANIM_SPEED" "$KOX_LAYER_SPEED" >&2
+    printf '  The config is deployed; restart Hyprland to apply it.\n' >&2
+    return 1
+}
+
 cmd_update() {
     local repo=$KOX_REPO
     local distro branch dirty
@@ -429,10 +503,21 @@ cmd_update() {
     # update into a silent no-op.
     printf '\n  %sApplying the updated dotfiles...%s\n' "$BOLD$CYAN" "$RESET"
     export KOX_ASSUME_DEFAULTS=1
-    exec bash "$repo/install.sh"
+    if ! bash "$repo/install.sh"; then
+        printf '\n  %skox:%s dotfile deployment failed.\n' \
+            "$RED" "$RESET" >&2
+        return 1
+    fi
 
-    # A successful pull can replace this very script. exec above replaces
-    # the process, so Bash never reads further bytes from the new file.
+    # Deployment succeeding only means the files are in place. Verify what
+    # the compositor is actually using before reporting success: a stale
+    # animation runtime is the difference between "deployed" and "visible".
+    # Advisory on purpose — the update itself completed.
+    verify_animations || true
+
+    # Do not exec here: the post-deploy check above would never run. The
+    # running process keeps the old bytes; the next `kox` invocation reads
+    # whatever the installer just deployed.
 }
 
 cmd_theme() {
