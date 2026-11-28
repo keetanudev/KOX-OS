@@ -59,4 +59,10 @@ hl.on("hyprland.start", function()
     -- `cliphist decode`.
     hl.exec_cmd("wl-paste --type text --watch cliphist store &")
     hl.exec_cmd("wl-paste --type image --watch cliphist store &")
+
+    -- Idle management: dim after 2 min, lock after 5 min, suspend after
+    -- 15 min. The rules live in ~/.config/hypr/hypridle.conf; the suspend
+    -- action goes through kox-suspend, which picks the command for the
+    -- running init system (systemd vs OpenRC).
+    hl.exec_cmd("hypridle")
 end)

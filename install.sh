@@ -112,6 +112,7 @@ PACKAGES_COMMON=(
     hyprland
     hyprpaper
     hyprlock
+    hypridle
     xorg-xwayland
 
     # Desktop shell

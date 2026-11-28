@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# kox-suspend: suspend the machine, honoring the running init system.
+#
+# systemd (Arch/CachyOS):  systemctl suspend
+# OpenRC  (Artix):         loginctl suspend (elogind) or zzz
+#
+# The screen is locked before the machine goes down, so waking it up never
+# lands on an unlocked session.
+set -uo pipefail
+
+INIT_SYSTEM="unknown"
+
+if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
+    INIT_SYSTEM="systemd"
+elif command -v loginctl >/dev/null 2>&1 || command -v zzz >/dev/null 2>&1; then
+    INIT_SYSTEM="openrc"
+else
+    printf 'kox-suspend: cannot determine how to suspend on this system.\n' >&2
+    exit 1
+fi
+
+# Lock first: the lock screen must be up before the session is suspended.
+if command -v kox >/dev/null 2>&1; then
+    kox lock >/dev/null 2>&1 || true
+fi
+
+case $INIT_SYSTEM in
+    systemd)
+        systemctl suspend
+        ;;
+    openrc)
+        if command -v loginctl >/dev/null 2>&1; then
+            loginctl suspend
+        else
+            zzz
+        fi
+        ;;
+esac
+rc=$?
+
+if ((rc != 0)); then
+    printf 'kox-suspend: suspend failed (rc=%s, init=%s).\n' "$rc" "$INIT_SYSTEM" >&2
+    notify-send "KOX" "Suspend failed" 2>/dev/null || true
+fi
+
+exit $rc
