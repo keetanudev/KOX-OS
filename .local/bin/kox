@@ -6,11 +6,12 @@
 # config edits. scale/lock exec the owner script so exit codes and signals
 # pass through untouched.
 #
-# Usage: kox <update|scale|lock|clipboard|suspend|doctor|default|theme|wallpaper|bar|cursor|help> [args]
+# Usage: kox <update|scale|lock|clipboard|suspend|idle|doctor|default|theme|wallpaper|bar|cursor|help> [args]
 set -u
 
 VERSION="0.1.0"
 KOX_REPO="${KOX_REPO:-$HOME/KOX-OS}"
+HYPRIDLE_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/hypridle.conf"
 
 # One tree, two lines: `main` is Artix/OpenRC, `arch-port` is Arch/CachyOS
 # with systemd. `kox update` must pull the branch that matches the running
@@ -266,6 +267,7 @@ cmd_help() {
     help_row lock "lock the session (quickshell + PAM)"
     help_row clipboard "open the clipboard history (cliphist + fuzzel)"
     help_row suspend "lock and suspend (systemd or OpenRC aware)"
+    help_row "idle [dim|lock|suspend] <minutes>" "set idle dim, lock or suspend timeouts"
 
     printf '\n  %sDIAGNOSTICS%s\n' "$CYAN" "$RESET"
     help_row doctor "check PipeWire, Bluetooth, Waybar, privileges"
@@ -310,6 +312,138 @@ cmd_clipboard() {
 
 cmd_suspend() {
     kox_exec kox-suspend "$@"
+}
+
+# --- idle management -------------------------------------------------------
+# ~/.config/hypr/hypridle.conf is a sequence of `listener { ... }` blocks whose
+# `timeout` is in seconds. Blocks are identified by their on-timeout command,
+# not by position, so reordering the file cannot retarget an edit:
+#   kox-suspend      -> suspend
+#   kox lock         -> lock
+#   brightnessctl/dpms -> dim
+idle_timeout_line() { # idle_timeout_line <dim|lock|suspend> -> line number
+    awk -v want="$1" '
+        function role(cmd) {
+            if (cmd ~ /kox-suspend/)            return "suspend"
+            if (cmd ~ /kox[[:space:]]+lock/)    return "lock"
+            if (cmd ~ /brightnessctl|dpms/)     return "dim"
+            return ""
+        }
+        function flush() {
+            if (inblk && tline > 0 && role(oncmd) == want) print tline
+            inblk = 0; tline = 0; oncmd = ""
+        }
+        /^[[:space:]]*listener[[:space:]]*\{/ { flush(); inblk = 1; next }
+        inblk && /^[[:space:]]*timeout[[:space:]]*=/    { tline = NR }
+        inblk && /^[[:space:]]*on-timeout[[:space:]]*=/ { oncmd = $0 }
+        inblk && /^[[:space:]]*\}/                      { flush() }
+        END { if (inblk) flush() }
+    ' "$HYPRIDLE_CONF"
+}
+
+idle_timeout_seconds() { # idle_timeout_seconds <role> -> seconds
+    local line
+    line=$(idle_timeout_line "$1") || return 1
+    [[ -n $line ]] || return 1
+    sed -n "${line}s/.*timeout[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$HYPRIDLE_CONF"
+}
+
+idle_set_timeout() { # idle_set_timeout <role> <seconds>
+    local role=$1 seconds=$2 line tmp
+    line=$(idle_timeout_line "$role")
+    if [[ -z $line ]]; then
+        printf '  %skox:%s no %s listener found in %s\n' \
+            "$RED" "$RESET" "$role" "$HYPRIDLE_CONF" >&2
+        return 1
+    fi
+
+    tmp=$(mktemp "${HYPRIDLE_CONF}.XXXXXX") || return 1
+    if ! awk -v line="$line" -v secs="$seconds" '
+        NR == line { sub(/timeout[[:space:]]*=[[:space:]]*[0-9]+/, "timeout = " secs) }
+        { print }
+    ' "$HYPRIDLE_CONF" > "$tmp"; then
+        rm -f -- "$tmp"
+        return 1
+    fi
+    chmod --reference="$HYPRIDLE_CONF" -- "$tmp" 2>/dev/null || chmod 644 "$tmp"
+    mv -f -- "$tmp" "$HYPRIDLE_CONF"
+}
+
+idle_restart_hypridle() {
+    pkill -x hypridle 2>/dev/null || true
+    command -v hypridle >/dev/null 2>&1 || return 1
+    # Detach from the terminal so closing it cannot SIGHUP the daemon.
+    setsid hypridle >/dev/null 2>&1 < /dev/null &
+    sleep 0.2
+    pgrep -x hypridle >/dev/null 2>&1
+}
+
+cmd_idle() {
+    local role minutes seconds
+    local -a roles=(dim lock suspend)
+
+    if (( $# == 0 )); then
+        if [[ ! -r $HYPRIDLE_CONF ]]; then
+            printf '  %skox:%s cannot read %s\n' \
+                "$RED" "$RESET" "$HYPRIDLE_CONF" >&2
+            return 1
+        fi
+        brand "idle timeouts"
+        for role in "${roles[@]}"; do
+            seconds=$(idle_timeout_seconds "$role" 2>/dev/null || true)
+            if [[ -z $seconds ]]; then
+                printf '    %-8s %s(no %s listener)%s\n' \
+                    "$role" "$DIM" "$role" "$RESET"
+            else
+                printf '    %s%-8s%s %s%2d min%s  %s(%ss)%s\n' \
+                    "$GREEN" "$role" "$RESET" "$BOLD" "$((seconds / 60))" "$RESET" \
+                    "$DIM" "$seconds" "$RESET"
+            fi
+        done
+        printf '\n  %susage:%s kox idle <dim|lock|suspend> <minutes>\n' "$DIM" "$RESET"
+        return 0
+    fi
+
+    if (( $# != 2 )); then
+        printf '  %susage:%s kox idle <dim|lock|suspend> <minutes>\n' "$DIM" "$RESET" >&2
+        return 2
+    fi
+
+    role=$1
+    minutes=$2
+
+    case $role in
+        dim|lock|suspend) ;;
+        *)
+            printf '  %skox:%s unknown idle target %s (use dim, lock or suspend)\n' \
+                "$RED" "$RESET" "$role" >&2
+            return 2
+            ;;
+    esac
+
+    if [[ ! $minutes =~ ^[0-9]+$ ]] || (( 10#$minutes < 1 || 10#$minutes > 1440 )); then
+        printf '  %skox:%s minutes must be an integer between 1 and 1440\n' \
+            "$RED" "$RESET" >&2
+        return 2
+    fi
+
+    if [[ ! -w $HYPRIDLE_CONF ]]; then
+        printf '  %skox:%s cannot write %s\n' "$RED" "$RESET" "$HYPRIDLE_CONF" >&2
+        return 1
+    fi
+
+    seconds=$(( 10#$minutes * 60 ))
+    idle_set_timeout "$role" "$seconds" || return 1
+
+    if idle_restart_hypridle; then
+        printf '  %s✓%s Idle %s timeout set to %d minutes\n' \
+            "$GREEN" "$RESET" "$role" "$((seconds / 60))"
+    else
+        printf '  %s✓%s Idle %s timeout set to %d minutes\n' \
+            "$GREEN" "$RESET" "$role" "$((seconds / 60))"
+        printf '  %s!%s hypridle is not running; it will pick this up at next login\n' \
+            "$RED" "$RESET" >&2
+    fi
 }
 
 cmd_picker() { # cmd_picker <tool> [args...] — exec a kox-pickers tool
@@ -750,6 +884,7 @@ main() {
         lock)            cmd_lock "$@" ;;
         clipboard)       cmd_clipboard "$@" ;;
         suspend)         cmd_suspend "$@" ;;
+        idle)            cmd_idle "$@" ;;
         doctor)          cmd_doctor ;;
         help|-h|--help)  cmd_help ;;
         *)               unknown_command "$cmd" ;;
