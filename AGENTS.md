@@ -113,7 +113,8 @@ KOX-OS/
 │   │   ├── autostart.lua         session-start commands
 │   │   ├── rules.lua             window/workspace rules
 │   │   ├── hyprpaper.conf        portable wallpaper config
-│   │   └── hyprlock.conf         fallback lockscreen
+│   │   ├── hyprlock.conf         fallback lockscreen
+│   │   └── hypridle.conf         idle rules: dim / lock / suspend
 │   ├── kitty/kitty.conf          terminal; font_size owned by kox-scale
 │   ├── kox-panel/scale.css       generated panel scale
 │   ├── kox-pickers/              coverflow QML
@@ -130,8 +131,9 @@ KOX-OS/
     ├── kox-pulse-autostart       pipewire-pulse guard
     ├── kox-session-env           D-Bus/systemd session environment publisher
     ├── kox-scale                 UI scale engine
+    ├── kox-suspend               init-aware suspend (systemctl / loginctl / zzz)
     ├── kox-waybar-autostart      guarded bar start + respawn
-    ├── kox-pickers/              kox-theme, kox-wallpaper, kox-cursor, kox-bar, kox-coverflow
+    ├── kox-pickers/              kox-theme, kox-wallpaper, kox-cursor, kox-bar, kox-coverflow, kox-clipboard
     └── kox-widgets/              kox-wifi, kox-bluetooth, kox-bt-watcher, kox-power
 ```
 
@@ -167,6 +169,8 @@ The `cachy-*` scripts are the inherited rice command surface. Keep them working;
 8. `mako`
 9. `udiskie --automount --no-notify --no-tray`
 10. `hyprpaper`
+11. `wl-paste --type text --watch cliphist store &` and the image twin (clipboard history)
+12. `hypridle` (idle rules from `~/.config/hypr/hypridle.conf`)
 
 Lua API notes:
 
@@ -268,6 +272,8 @@ Direct accent-only palettes (`kox theme blue`, `kox theme pink`) use `themes/<na
 | `kox bar` | bar-style picker (stub) |
 | `kox scale <9-20\|current\|reset\|apply>` | UI scale |
 | `kox lock` | exec `kox-lock` |
+| `kox clipboard` | clipboard history picker (`kox-pickers/kox-clipboard`, cliphist + fuzzel) |
+| `kox suspend` | lock, then suspend through `kox-suspend` (systemd → `systemctl suspend`, OpenRC → `loginctl suspend`/`zzz`) |
 | `kox doctor` | PipeWire, Bluetooth, Waybar and privilege checks |
 | `kox help` | command reference |
 
@@ -303,6 +309,20 @@ Direct accent-only palettes (`kox theme blue`, `kox theme pink`) use `themes/<na
 - Cleans the staging tree on failure.
 
 Never replace this with a naive copy. The Emergency Mode incident on 2026-11-22 was caused by exactly that.
+
+### 5.9 Daily-driver essentials
+
+**Clipboard history**
+
+- `autostart.lua` starts two watchers: `wl-paste --type text --watch cliphist store &` and the image twin. `wl-paste --watch` follows one MIME type, so both are needed.
+- `kox clipboard` execs `~/.local/bin/kox-pickers/kox-clipboard`. It lists `cliphist list` (`<id>\t<content>`, newest first), shows the text in fuzzel, and restores the picked entry with `cliphist decode <id> | wl-copy` — `cliphist decode` takes the **id**, not the text.
+- `SUPER + V` opens the history; plain paste moved to `SUPER + SHIFT + V` so the picker does not steal the paste shortcut. `SUPER + CTRL + V` is an alias for the same picker.
+
+**Idle management**
+
+- `hypridle` reads `~/.config/hypr/hypridle.conf`: dim at 2 min, lock at 5 min, lock + suspend at 15 min. Waking up always lands on a locked screen.
+- Suspend goes through `~/.local/bin/kox-suspend`, which detects the init system (`systemctl suspend` on systemd, `loginctl suspend` or `zzz` on OpenRC/elogind) and locks the session before suspending.
+- `hypridle` and `brightnessctl` are installed by `install.sh` (`PACKAGES_COMMON`).
 
 ---
 
