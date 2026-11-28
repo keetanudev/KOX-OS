@@ -6,7 +6,7 @@
 # config edits. scale/lock exec the owner script so exit codes and signals
 # pass through untouched.
 #
-# Usage: kox <update|scale|lock|clipboard|suspend|doctor|theme|wallpaper|bar|cursor|help> [args]
+# Usage: kox <update|scale|lock|clipboard|suspend|doctor|default|theme|wallpaper|bar|cursor|help> [args]
 set -u
 
 VERSION="0.1.0"
@@ -252,6 +252,7 @@ cmd_help() {
     printf '\n  %sSYSTEM%s\n' "$CYAN" "$RESET"
     help_row update "sync packages, pull the dotfiles repo and deploy them"
     help_row "scale <number>" "set UI type scale (9-20, current, reset, apply)"
+    help_row "default <role> <app>" "set browser, terminal, fileManager, or editor"
 
     printf '\n  %sAPPEARANCE%s\n' "$CYAN" "$RESET"
     help_row theme "open the visual theme picker (11 rice themes)"
@@ -576,6 +577,154 @@ cmd_theme() {
     return 0
 }
 
+need_tool() { # need_tool <name> — fail with a clear message when absent
+    command -v "$1" >/dev/null 2>&1 || {
+        printf '  %skox:%s %s is not installed; install it and retry.\n' \
+            "$RED" "$RESET" "$1" >&2
+        return 1
+    }
+}
+
+cmd_default() {
+    local role=${1:-} target=${2:-} app_id executable config dir tmp desktop_file exec_line desktop_cmd has_desktop=0
+    local browser terminal file_manager editor mimetype
+    if [[ $# -ne 2 || ! $role =~ ^(browser|terminal|filemanager|fileManager|editor)$ ]]; then
+        printf '  %skox:%s usage: kox default <browser|terminal|fileManager|editor> <app|app.desktop>\n' \
+            "$RED" "$RESET" >&2
+        return 2
+    fi
+    # Accept the common lowercase spelling too; the Lua file uses camelCase.
+    [[ $role == filemanager ]] && role=fileManager
+    if [[ ! $target =~ ^[A-Za-z0-9._+-]+$ ]]; then
+        printf '  %skox:%s app names must contain only letters, digits, dot, underscore, plus, and hyphen.\n' \
+            "$RED" "$RESET" >&2
+        return 2
+    fi
+
+    if [[ $target == *.desktop ]]; then
+        app_id=$target
+        local desktop_file=""
+        for dir in "${XDG_DATA_HOME:-$HOME/.local/share}/applications" /usr/share/applications; do
+            if [[ -f $dir/$app_id ]]; then desktop_file=$dir/$app_id; break; fi
+        done
+        if [[ -z $desktop_file ]]; then
+            printf '  %skox:%s desktop entry not found: %s\n' "$RED" "$RESET" "$app_id" >&2
+            return 1
+        fi
+        has_desktop=1
+        executable="$(sed -nE 's/^Exec=[[:space:]]*([^[:space:]%]+).*/\1/p' "$desktop_file" | head -n1)"
+        executable=${executable##*/}
+    else
+        executable=$target
+        app_id=""
+    fi
+    if [[ ! $executable =~ ^[A-Za-z0-9._+-]+$ ]] || ! command -v "$executable" >/dev/null 2>&1; then
+        printf '  %skox:%s application command is not installed: %s\n' "$RED" "$RESET" "$executable" >&2
+        return 1
+    fi
+
+    need_tool sed || return 1
+    # Desktop IDs are not always the binary name (for example brave-browser
+    # versus brave-browser.desktop). Resolve by the desktop entry's Exec field.
+    if [[ -z $app_id ]]; then
+        for dir in "${XDG_DATA_HOME:-$HOME/.local/share}/applications" /usr/share/applications; do
+            [[ -d $dir ]] || continue
+            while IFS= read -r -d '' desktop_file; do
+                exec_line="$(sed -n 's/^Exec=//p' "$desktop_file" | head -n1)"
+                desktop_cmd=${exec_line%%[[:space:]]*}
+                desktop_cmd=${desktop_cmd#\"}
+                desktop_cmd=${desktop_cmd%\"}
+                desktop_cmd=${desktop_cmd##*/}
+                if [[ $desktop_cmd == "$executable" ]]; then
+                    app_id=${desktop_file##*/}
+                    has_desktop=1
+                    break 2
+                fi
+            done < <(find "$dir" -maxdepth 1 -type f -name '*.desktop' -print0 2>/dev/null)
+        done
+        if [[ -z $app_id && $role =~ ^(browser|fileManager)$ ]]; then
+            printf '  %skox:%s no .desktop entry for %s was found; cannot set its XDG association.\n' \
+                "$RED" "$RESET" "$executable" >&2
+            return 1
+        fi
+        app_id=${app_id:-"$executable.desktop"}
+    fi
+
+    if [[ $role == browser ]]; then
+        if [[ ! -x "$HOME/.local/bin/kox-browser" || ! -f "${XDG_DATA_HOME:-$HOME/.local/share}/applications/kox-browser.desktop" ]]; then
+            printf '  %skox:%s deploy the KOX Browser Router before setting the browser default.\n' \
+                "$RED" "$RESET" >&2
+            return 1
+        fi
+        # XDG always launches the router; it reads the selected executable
+        # from defaults.lua and supplies Chromium's system-notification flag.
+        app_id=kox-browser.desktop
+    fi
+
+    config="$HOME/.config/hypr/defaults.lua"
+    mkdir -p "${config%/*}"
+    read_default() {
+        local key=$1 fallback=$2 value=""
+        if [[ -r $config ]]; then
+            value="$(sed -nE "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\"([A-Za-z0-9._+-]+)\"[,}]?[[:space:]]*$/\\1/p" "$config" | head -n1)"
+        fi
+        printf '%s' "${value:-$fallback}"
+    }
+    browser=$(read_default browser firefox)
+    terminal=$(read_default terminal kitty)
+    file_manager=$(read_default fileManager nautilus)
+    editor=$(read_default editor micro)
+    case $role in
+        browser) browser=$executable ;;
+        terminal) terminal=$executable ;;
+        fileManager) file_manager=$executable ;;
+        editor) editor=$executable ;;
+    esac
+    tmp="$(mktemp "${config}.XXXXXX")" || return 1
+    if ! printf '%s\n' \
+        '-- User-selected XDG application defaults. `kox default` owns updates.' \
+        'return {' \
+        "    browser = \"$browser\"," \
+        "    terminal = \"$terminal\"," \
+        "    fileManager = \"$file_manager\"," \
+        "    editor = \"$editor\"," \
+        '}' > "$tmp"; then
+        rm -f -- "$tmp"
+        return 1
+    fi
+    chmod 644 "$tmp"
+    mv -f -- "$tmp" "$config"
+
+    case $role in
+        browser)
+            need_tool xdg-settings || return 1
+            if ! xdg-settings set default-web-browser "$app_id"; then
+                printf '  %skox:%s saved browser default, but xdg-settings could not update this session.\n' "$RED" "$RESET" >&2
+                return 1
+            fi
+            need_tool xdg-mime || return 1
+            for mimetype in text/html application/xhtml+xml x-scheme-handler/http x-scheme-handler/https; do
+                xdg-mime default "$app_id" "$mimetype" || return 1
+            done
+            ;;
+        fileManager)
+            need_tool xdg-mime || return 1
+            xdg-mime default "$app_id" inode/directory || return 1
+            ;;
+        editor)
+            if (( has_desktop )); then
+                need_tool xdg-mime || return 1
+                xdg-mime default "$app_id" text/plain || return 1
+            else
+                printf '  %s·%s %s has no desktop entry; command default saved for terminal launchers.\n' \
+                    "$DIM" "$RESET" "$executable"
+            fi
+            ;;
+        terminal) ;;
+    esac
+    printf '  %s✓%s default %s: %s (%s)\n' "$GREEN" "$RESET" "$role" "$executable" "$app_id"
+}
+
 unknown_command() {
     printf '  %skox:%s unknown command %s%s%s\n' \
         "$RED" "$RESET" "$BOLD" "$1" "$RESET" >&2
@@ -592,6 +741,7 @@ main() {
 
     case $cmd in
         update)          cmd_update "$@" ;;
+        default)         cmd_default "$@" ;;
         theme)           cmd_theme "$@" ;;
         wallpaper)       cmd_wallpaper "$@" ;;
         bar)             cmd_bar "$@" ;;

@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Launch the selected browser, enabling desktop notification integration for
+# Chromium-family browsers. XDG's KOX Browser Router desktop entry calls here.
+set -euo pipefail
+
+config="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/defaults.lua"
+browser="firefox"
+if [[ -r "$config" ]]; then
+    configured="$(sed -nE 's/^[[:space:]]*browser[[:space:]]*=[[:space:]]*"([A-Za-z0-9._+-]+)"[,}]?[[:space:]]*$/\1/p' "$config" | head -n1)"
+    [[ -z "$configured" ]] || browser="$configured"
+fi
+
+# A removed or unavailable selection should not make browser shortcuts fail.
+if ! command -v "$browser" >/dev/null 2>&1; then
+    for fallback in firefox chromium brave-browser; do
+        if command -v "$fallback" >/dev/null 2>&1; then
+            browser=$fallback
+            break
+        fi
+    done
+fi
+if ! command -v "$browser" >/dev/null 2>&1; then
+    printf 'kox-browser: install a browser or set one with `kox default browser APP`\n' >&2
+    exit 127
+fi
+
+private=0
+if [[ ${1:-} == --private ]]; then
+    private=1
+    shift
+fi
+
+case "${browser,,}" in
+    brave*|chromium*|google-chrome*|chrome*|microsoft-edge*|vivaldi*|opera*)
+        if (( private )); then
+            exec "$browser" --enable-features=SystemNotifications --incognito "$@"
+        fi
+        exec "$browser" --enable-features=SystemNotifications "$@"
+        ;;
+    firefox*|librewolf*|waterfox*)
+        if (( private )); then
+            exec "$browser" --private-window "$@"
+        fi
+        exec "$browser" "$@"
+        ;;
+    *)
+        # Unknown browser: preserve URL handling, applying the conventional
+        # private-window switch only when explicitly requested.
+        if (( private )); then
+            exec "$browser" --private-window "$@"
+        fi
+        exec "$browser" "$@"
+        ;;
+esac

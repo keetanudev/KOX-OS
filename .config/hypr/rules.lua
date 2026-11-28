@@ -65,25 +65,45 @@ hl.window_rule({
 -- REVERT (2026-11-12): the earlier rule floated *every* Nautilus window,
 -- which is not what was asked for. Nautilus stays tiled by default again.
 --
--- The correct target is the "where to save this file" dialog opened by
--- browser downloads / GTK apps via xdg-desktop-portal-gtk — verified
--- 2026-11-12 with gdbus (portal FileChooser.SaveFile): class
--- "xdg-desktop-portal-gtk", title "Save File", not modal, tiled by default.
--- Broadened on 2026-11-14 to also catch the common Chromium download
--- dialogs whose title is the suggested *filename* (e.g. "Download_me.pdf"
--- or "file.zip") instead of a literal "Save..." string.
--- If you also want the portal OPEN/folder picker dialogs floating, drop the
--- title match instead (they will float for *any* portal file chooser).
+-- Portal open/save dialogs share this class. Keep them predictable and
+-- centered, while preventing activation requests from stealing focus.
 hl.window_rule({
-    name   = "float-save-dialogs",
-    match  = {
-        class = "xdg-desktop-portal-gtk",
-        title = "(?i)(save.*|download.*|.*\\.(zip|rar|7z|tar|tar\\.gz|deb|rpm|iso|dmg|msi|apk|appimage|exe|jar|war|pdf|doc|docx|xls|xlsx|ppt|pptx|odt|ods|odp|rtf|mp4|webm|mov|mp3|m4a|flac|mkv|png|jpg|jpeg|gif|webp|heic|avif)$)",
-    },
+    name              = "float-portal-file-dialogs",
+    match             = { class = "^xdg-desktop-portal-gtk$" },
+    float             = true,
+    center            = true,
+    size              = "800 600",
+    focus_on_activate = false,
+})
+
+---------------------------
+---- AUTHENTICATION   -----
+---------------------------
+-- Authentication must be focused so the password can be entered immediately.
+hl.window_rule({
+    name   = "float-polkit-authentication",
+    match  = { class = "^polkit-gnome-authentication-agent-1$" },
     float  = true,
     center = true,
-    size   = "640 480",
+    size   = "480 280",
 })
+
+-----------------------
+---- SYSTEM UTILITIES --
+-----------------------
+for _, class in ipairs({
+    "^blueman-manager$",
+    "^nm-connection-editor$",
+    "^pavucontrol$",
+}) do
+    hl.window_rule({
+        name   = "float-utility-" .. class:gsub("[^%w]", ""),
+        match  = { class = class },
+        float  = true,
+        center = true,
+        size   = "800 600",
+    })
+end
 
 -------------------------
 ---- WEBSITE LOGINS -----

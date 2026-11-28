@@ -7,13 +7,21 @@
 -- DSP API is absent in this Hyprland build instead of breaking the config.
 
 local mainMod = "SUPER"
-local terminal = "kitty"
-local browser = "brave-origin"
-local files = "nautilus --new-window"
-local editor = terminal .. " -e micro"
-local monitor = terminal .. " -e btop"
 -- home is resolved at runtime so this config is portable across users/machines
 local home = os.getenv("HOME") or "/root"
+local defaults = {}
+do
+  local ok, value = pcall(dofile, home .. "/.config/hypr/defaults.lua")
+  if ok and type(value) == "table" then defaults = value end
+end
+local function app(name, fallback)
+  local value = defaults[name]
+  if type(value) == "string" and value:match("^[%w._+-]+$") then return value end
+  return fallback
+end
+local terminal = home .. "/.local/bin/kox-terminal"
+local editor = app("editor", "micro")
+local fileManager = app("fileManager", "nautilus")
 
 -- Exposed to hyprland.lua's emergency-mode guard. Zero means the normal
 -- keymap did not register, so the rescue bind must stay active.
@@ -33,15 +41,15 @@ end
 ------------------
 -- Omarchy: Super+Return terminal / Super+Shift+Return browser (exact function)
 safe_bind(mainMod .. " + Return", hl.dsp.exec_cmd(terminal))
-safe_bind(mainMod .. " + SHIFT + Return", hl.dsp.exec_cmd(browser))
-safe_bind(mainMod .. " + SHIFT + B", hl.dsp.exec_cmd(browser))
-safe_bind(mainMod .. " + SHIFT + ALT + B", hl.dsp.exec_cmd(browser .. " --incognito"))
+safe_bind(mainMod .. " + SHIFT + Return", hl.dsp.exec_cmd("kox-browser https://"))
+safe_bind(mainMod .. " + SHIFT + B", hl.dsp.exec_cmd("kox-browser https://"))
+safe_bind(mainMod .. " + SHIFT + ALT + B", hl.dsp.exec_cmd("kox-browser --private https://"))
 -- Omarchy: Super+Shift+F files / Super+Shift+Alt+F files-in-term-cwd (exact)
-safe_bind(mainMod .. " + SHIFT + F", hl.dsp.exec_cmd(files))
+safe_bind(mainMod .. " + SHIFT + F", hl.dsp.exec_cmd("xdg-open \"$HOME\""))
 safe_bind(mainMod .. " + SHIFT + ALT + F", hl.dsp.exec_cmd("cachy-nautilus-cwd"))
 -- Approx: editor (micro) / activity (btop) replace Neovim/Omarchy panels
-safe_bind(mainMod .. " + SHIFT + N", hl.dsp.exec_cmd(editor))
-safe_bind(mainMod .. " + CTRL + T", hl.dsp.exec_cmd(monitor))
+safe_bind(mainMod .. " + SHIFT + N", hl.dsp.exec_cmd(terminal .. " -e " .. editor))
+safe_bind(mainMod .. " + CTRL + T", hl.dsp.exec_cmd(terminal .. " -e btop"))
 
 ------------------
 ---- MENUS --------

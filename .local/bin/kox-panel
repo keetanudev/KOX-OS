@@ -209,6 +209,32 @@ ICONS = {
     "tachometer": "\U000F04C5",
 }
 
+# The panel remains usable when the optional Nerd Font package is missing:
+# replace private-use glyphs with short readable labels instead of rendering
+# tofu boxes. Normal installs keep the compact icon set above.
+try:
+    _font_check = subprocess.run(
+        ["fc-match", "-f", "%{family}", "JetBrainsMono Nerd Font"],
+        capture_output=True, text=True, timeout=2, check=False,
+    )
+    _font_available = "jetbrainsmono nerd font" in _font_check.stdout.lower()
+except (OSError, subprocess.SubprocessError):
+    _font_available = False
+if not _font_available:
+    _icon_text = {
+        "bluetooth": "BT", "bluetooth_conn": "BT+", "bluetooth_off": "BT-",
+        "wifi": "Wi", "wifi_off": "Wi-", "wifi_s4": "Wi4", "wifi_s3": "Wi3",
+        "wifi_s2": "Wi2", "wifi_s1": "Wi1", "battery_full": "Bat",
+        "battery_80": "Bat", "battery_half": "Bat", "battery_low": "Bat",
+        "battery_empty": "Bat", "battery_bolt": "Bat+", "plug": "Pwr",
+        "trash": "Del", "refresh": "R", "volume": "Vol", "volume_mute": "Mute",
+        "sun": "Bri", "check": "OK", "connect": "On", "disconnect": "Off",
+        "link": "Link", "lock": "Lock", "qrcode": "QR", "performance": "Fast",
+        "balanced": "Bal", "power_saver": "Save", "play": "On", "stop": "Off",
+        "carrot": "Save", "adjust": "Bal", "tachometer": "Fast",
+    }
+    ICONS.update(_icon_text)
+
 # ---------------------------------------------------------------------------
 # process helpers
 # ---------------------------------------------------------------------------

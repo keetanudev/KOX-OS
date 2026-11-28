@@ -12,7 +12,7 @@
 local rescueBind
 do
     local ok, bind = pcall(hl.bind, "SUPER + SHIFT + ESCAPE",
-        hl.dsp.exec_cmd("kitty"),
+        hl.dsp.exec_cmd((os.getenv("HOME") or "/root") .. "/.local/bin/kox-terminal"),
         { description = "KOX rescue terminal (config recovery)" })
     if ok then
         rescueBind = bind
@@ -56,5 +56,8 @@ hl.config({
     misc = {
         disable_hyprland_logo    = true,
         disable_splash_rendering = true,
+        -- Do not let XDG activation requests (such as portal dialogs)
+        -- steal focus from the current tiled workflow.
+        focus_on_activate        = false,
     },
 })
