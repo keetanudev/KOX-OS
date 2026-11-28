@@ -57,7 +57,7 @@ Target: a fast, self-contained, fresh-installable desktop. Idle RAM budget: **�
 | Shell UI | Quickshell 0.3.2 |
 | Current theme | `tokyonight` |
 | Current accent | `#7aa2f7` (border state `7aa2f7ee`) |
-| Current wallpaper | `/home/ved/Pictures/Wallpapers/4.jpg` |
+| Current wallpaper | `/home/ved/Pictures/Wallpapers/dark-batman-noir.jpg` (changed from `4.jpg` on 2026-11-28 by choice) |
 | Current cursor | `macOS-White` |
 | UI scale | `10` |
 | Baseline bind count | 116 |
@@ -112,6 +112,7 @@ KOX-OS/
 │   │   ├── bindings.lua          keybinds + KOX_BINDINGS_REGISTERED
 │   │   ├── autostart.lua         session-start commands
 │   │   ├── rules.lua             window/workspace rules
+│   │   ├── defaults.lua          user-selected app roles (browser/terminal/fileManager/editor)
 │   │   ├── hyprpaper.conf        portable wallpaper config
 │   │   ├── hyprlock.conf         fallback lockscreen
 │   │   └── hypridle.conf         idle rules: dim / lock / suspend
@@ -130,6 +131,9 @@ KOX-OS/
     ├── kox-panel-autostart       guarded panel daemon start
     ├── kox-pulse-autostart       pipewire-pulse guard
     ├── kox-session-env           D-Bus/systemd session environment publisher
+    ├── kox-browser               XDG browser router (reads defaults.lua)
+    ├── kox-private-browser       incognito window of the configured browser
+    ├── kox-terminal              configured terminal launcher (defaults.lua)
     ├── kox-scale                 UI scale engine
     ├── kox-suspend               init-aware suspend (systemctl / loginctl / zzz)
     ├── kox-waybar-autostart      guarded bar start + respawn
@@ -147,7 +151,7 @@ The `cachy-*` scripts are the inherited rice command surface. Keep them working;
 
 `hyprland.lua` is the entrypoint. It **must** keep this order:
 
-1. Register the rescue bind `SUPER + SHIFT + ESCAPE` → `kitty` **before any module loads**, via `pcall(hl.bind, ...)`.
+1. Register the rescue bind `SUPER + SHIFT + ESCAPE` → `kox-terminal` **before any module loads**, via `pcall(hl.bind, ...)`. `kox-terminal` reads `defaults.lua` and falls back to kitty/foot/alacritty, so the rescue path survives a partially broken config.
 2. Load modules in order with `pcall(require, ...)`:
    `monitors`, `input`, `looknfeel`, `bindings`, `autostart`, `rules`.
 3. Remove the rescue bind **only if every module loaded and `KOX_BINDINGS_REGISTERED > 0`**.
@@ -273,6 +277,7 @@ Direct accent-only palettes (`kox theme blue`, `kox theme pink`) use `themes/<na
 | `kox scale <9-20\|current\|reset\|apply>` | UI scale |
 | `kox lock` | exec `kox-lock` |
 | `kox clipboard` | clipboard history picker (`kox-pickers/kox-clipboard`, cliphist + fuzzel) |
+| `kox default <role> <app>` | set the `browser`, `terminal`, `fileManager` or `editor` role; writes `~/.config/hypr/defaults.lua` and the XDG associations |
 | `kox suspend` | lock, then suspend through `kox-suspend` (systemd → `systemctl suspend`, OpenRC → `loginctl suspend`/`zzz`) |
 | `kox doctor` | PipeWire, Bluetooth, Waybar and privilege checks |
 | `kox help` | command reference |
@@ -334,6 +339,7 @@ Never replace this with a naive copy. The Emergency Mode incident on 2026-11-22 
 | Path | Owner | Meaning |
 | --- | --- | --- |
 | `~/.config/kox/ui-scale` | `kox-scale` | integer 9–20, reference 11 |
+| `~/.config/hypr/defaults.lua` | `kox default` | user-selected app roles; the installer preserves it across deploys |
 | `~/.config/kox/pickers/theme` | `kox-theme` | active coverflow theme name |
 | `~/.config/kox/pickers/theme-border` | `kox-theme` | `rrggbbaa` border colour read by `looknfeel.lua` |
 | `~/.config/kox/pickers/accent` | `kox` / `kox-theme` | accent-only palette name (e.g. `blue`) |
@@ -365,6 +371,17 @@ kox update
 ```
 
 `kox update` detects the distro, checks out the matching branch (`main` on Artix/OpenRC, `arch-port` on Arch/CachyOS/systemd), runs `pacman -Syu`, pulls that branch fast-forward, then runs the installer with defaults assumed. The installer deploys the repo over the live config using `deploy_tree()`, restores the saved appearance, and reloads Hyprland if a session is running.
+
+### Branch split
+
+| Branch | Owns |
+| --- | --- |
+| `main` | the shared desktop **and** the OpenRC baseline — this is what Artix deploys |
+| `arch-port` | `main` plus the Arch/CachyOS extras: the Plymouth theme (`plymouth/themes/kox`, `scripts/remove-plymouth.sh`) and `scripts/kox-ai-fallback.sh` |
+
+`main` must stay strictly OpenRC-compatible. Its `install.sh` is identical to `arch-port`'s: the `systemctl` calls sit behind `$INIT_SYSTEM == systemd` guards with OpenRC `rc-update` branches, so nothing Arch-only may be merged into `main` beyond the shared UI.
+
+Shared UI work lands on `main` first and is merged forward into `arch-port`. Do **not** develop shared UI on `arch-port` and leave it there — that is what made the live Artix box run the `arch-port` flavour of `bindings.lua` while `kox update` kept restoring the `main` flavour.
 
 ### Manual deploy
 
@@ -565,7 +582,7 @@ Current baseline (verify with `git log`):
   - `2408f6b` — Preserve saved wallpaper during theme restore
 - The NVMe repo was clean at the migration baseline; the NVMe is unmounted and ready to boot.
 - Live code matches the repo. The only live differences are the five appearance-generated files (fuzzel, hyprpaper, kitty, mako, theme-accent) that carry the current theme.
-- NVMe appearance: `tokyonight`, accent `#7aa2f7`, wallpaper `4.jpg`, cursor `macOS-White`, `ui-scale=10`.
+- NVMe appearance: `tokyonight`, accent `#7aa2f7`, wallpaper `dark-batman-noir.jpg`, cursor `macOS-White`, `ui-scale=10`.
 - Ndot lockscreen fonts are installed at `~/.local/share/fonts/ndot/` and visible to fontconfig.
 - SATA is being wiped for Arch. Its KOX state, legacy scripts and OpenCode history are archived under `~/Documents/KOX-OS/`.
 
@@ -584,7 +601,7 @@ Then confirm:
 3. `kitty` opens tiled/normal, not fullscreen.
 4. `kox theme` opens the coverflow picker with `tokyonight` active.
 5. `kox wallpaper` opens the coverflow picker with thumbnails.
-6. `kox update` completes without Emergency Mode and preserves `tokyonight`, wallpaper `4.jpg`, cursor `macOS-White` and scale `10`.
+6. `kox update` completes without Emergency Mode and preserves `tokyonight`, wallpaper `dark-batman-noir.jpg`, cursor `macOS-White` and scale `10`.
 7. `SUPER + SHIFT + ESCAPE` is not needed in a healthy session but remains available.
 
 ### Reports and artifacts
