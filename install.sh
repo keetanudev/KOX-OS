@@ -118,6 +118,7 @@ PACKAGES_COMMON=(
     # Desktop shell
     waybar
     kitty
+    firefox
     fuzzel
     mako
     quickshell
@@ -627,6 +628,22 @@ install_packages() {
     else
         die "Package installation failed. Fix the pacman error above (a full 'sudo pacman -Syu' may be needed), then run the installer again."
     fi
+
+    # The compositor, terminal and pickers are the tools the KOX session
+    # starts on boot. Some distros (and split repos) can leave a package out;
+    # warn loudly instead of failing the whole install for one app.
+    local required
+    local missing=()
+    for required in kitty nautilus firefox fuzzel waybar hyprland quickshell; do
+        if ! command -v "$required" >/dev/null 2>&1; then
+            missing+=("$required")
+        fi
+    done
+    if (( ${#missing[@]} > 0 )); then
+        warn "The following apps are missing after installation: ${missing[*]}. Install them with 'sudo pacman -S ${missing[*]}' or pick a different repo, then re-run install.sh."
+    else
+        ok "Core applications verified: kitty nautilus firefox fuzzel waybar hyprland quickshell"
+    fi
 }
 
 backup_existing_configs() {
@@ -776,12 +793,28 @@ reload_hyprland_if_running() {
 }
 
 deploy_dotfiles() {
+    local defaults_state=""
     step "Deploying KOX OS dotfiles"
 
     mkdir -p "$TARGET_HOME/.config" "$TARGET_HOME/.local/bin"
 
+    # Stop any running panel before replacing configs/scripts it reads, so
+    # there is never a reader racing a half-updated file ("widget jitter").
+    pkill -f kox-panel 2>/dev/null || true
+
     info "Installing ~/.config ..."
+    # defaults.lua is user-selected state, so keep an existing choice when
+    # deploying the repository's first-run defaults.
+    if [[ -f "$TARGET_HOME/.config/hypr/defaults.lua" ]]; then
+        defaults_state="$TARGET_HOME/.config/hypr/.defaults.lua.kox-preserve.$$"
+        cp -p -- "$TARGET_HOME/.config/hypr/defaults.lua" "$defaults_state" ||
+            die "Could not preserve the selected application defaults."
+    fi
     deploy_tree "$REPO_DIR/.config" "$TARGET_HOME/.config" "~/.config"
+    if [[ -n $defaults_state ]]; then
+        mv -f -- "$defaults_state" "$TARGET_HOME/.config/hypr/defaults.lua" ||
+            die "Could not restore the selected application defaults."
+    fi
 
     # The shipped dotfiles are authored at UI scale 10 (Waybar height 24,
     # theme-scale.css 10px, kitty 8pt, fuzzel 12, mako 10). Seed the scale
@@ -796,6 +829,11 @@ deploy_dotfiles() {
 
     info "Installing ~/.local ..."
     deploy_tree "$REPO_DIR/.local" "$TARGET_HOME/.local" "~/.local"
+
+    # Bring the panel back up once the new files are in place; the pkill
+    # above guarantees exactly one daemon instance (no duplicates/second bar).
+    # Backgrounded and output-silenced; never fails the install.
+    "$TARGET_HOME/.local/bin/kox-panel" --daemon >/dev/null 2>&1 &
 
     ok "Dotfiles deployed to $TARGET_HOME"
 
