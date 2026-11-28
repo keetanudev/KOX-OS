@@ -483,6 +483,17 @@ cmd_default() {
         app_id=${app_id:-"$executable.desktop"}
     fi
 
+    if [[ $role == browser ]]; then
+        if [[ ! -x "$HOME/.local/bin/kox-browser" || ! -f "${XDG_DATA_HOME:-$HOME/.local/share}/applications/kox-browser.desktop" ]]; then
+            printf '  %skox:%s deploy the KOX Browser Router before setting the browser default.\n' \
+                "$RED" "$RESET" >&2
+            return 1
+        fi
+        # XDG always launches the router; it reads the selected executable
+        # from defaults.lua and supplies Chromium's system-notification flag.
+        app_id=kox-browser.desktop
+    fi
+
     config="$HOME/.config/hypr/defaults.lua"
     mkdir -p "${config%/*}"
     read_default() {

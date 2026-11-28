@@ -41,9 +41,9 @@ end
 ------------------
 -- Omarchy: Super+Return terminal / Super+Shift+Return browser (exact function)
 safe_bind(mainMod .. " + Return", hl.dsp.exec_cmd(terminal))
-safe_bind(mainMod .. " + SHIFT + Return", hl.dsp.exec_cmd("xdg-open https://"))
-safe_bind(mainMod .. " + SHIFT + B", hl.dsp.exec_cmd("xdg-open https://"))
-safe_bind(mainMod .. " + SHIFT + ALT + B", hl.dsp.exec_cmd("kox-private-browser"))
+safe_bind(mainMod .. " + SHIFT + Return", hl.dsp.exec_cmd("kox-browser https://"))
+safe_bind(mainMod .. " + SHIFT + B", hl.dsp.exec_cmd("kox-browser https://"))
+safe_bind(mainMod .. " + SHIFT + ALT + B", hl.dsp.exec_cmd("kox-browser --private https://"))
 -- Omarchy: Super+Shift+F files / Super+Shift+Alt+F files-in-term-cwd (exact)
 safe_bind(mainMod .. " + SHIFT + F", hl.dsp.exec_cmd("xdg-open \"$HOME\""))
 safe_bind(mainMod .. " + SHIFT + ALT + F", hl.dsp.exec_cmd("cachy-nautilus-cwd"))

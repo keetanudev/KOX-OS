@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=KOX Browser Router
+Comment=Open links with the selected KOX browser
+Exec=kox-browser %U
+TryExec=kox-browser
+Icon=web-browser
+Terminal=false
+NoDisplay=true
+Categories=Network;WebBrowser;
+MimeType=text/html;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
