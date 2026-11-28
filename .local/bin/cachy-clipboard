@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# cachy-clipboard: cliphist + fuzzel clipboard history (Omarchy Super+Ctrl+V equivalent).
-# Requires cliphist watcher running (started from hypr autostart).
-set -euo pipefail
-SEL="$(cliphist list | fuzzel --dmenu --prompt 'Clipboard: ')" || exit 0
-[[ -n "$SEL" ]] && echo "$SEL" | cliphist decode | wl-copy
+# cachy-clipboard: compatibility alias for the KOX clipboard picker.
+# The old implementation piped the picked text into `cliphist decode`, but
+# cliphist expects the entry id, so it could not restore anything.
+exec "$HOME/.local/bin/kox-pickers/kox-clipboard" "$@"

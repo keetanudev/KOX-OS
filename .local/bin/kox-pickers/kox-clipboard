@@ -46,10 +46,26 @@ if ((${#labels[@]} == 0)); then
     exit 0
 fi
 
+# Fuzzel 1.15 has no --preview pane (and no --info); it only renders the
+# match list. Anything it writes to stderr is a real error (a cancelled
+# picker exits 1 silently), so surface it instead of exiting quietly.
+err_file="$(mktemp)"
 selection="$(
     printf '%s\n' "${labels[@]}" |
-        fuzzel --dmenu --prompt 'Clipboard > ' --preview 'echo {}'
-)" || exit 0
+        fuzzel --dmenu --prompt 'Clipboard > ' 2>"$err_file"
+)"
+rc=$?
+fuzzel_err="$(cat "$err_file" 2>/dev/null)"
+rm -f -- "$err_file"
+
+if ((rc != 0)); then
+    if [[ -n $fuzzel_err ]]; then
+        printf 'kox-clipboard: fuzzel failed: %s\n' "$fuzzel_err" >&2
+        notify-send "Clipboard" "fuzzel failed to start" 2>/dev/null || true
+        exit 1
+    fi
+    exit 0
+fi
 [[ -n $selection ]] || exit 0
 
 # Map the picked text back to its cliphist id.
