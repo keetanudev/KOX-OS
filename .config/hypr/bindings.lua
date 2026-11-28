@@ -146,9 +146,14 @@ if hl.dsp.send_key_state and hl.dispatch and hl.timer then
   safe_bind(mainMod .. " + SHIFT + V", send_once("CTRL", "V"))
   safe_bind(mainMod .. " + X", send_once("CTRL", "X"))
 end
--- Clipboard history picker (cliphist + fuzzel), Super+V and Super+Ctrl+V
-safe_bind(mainMod .. " + V", hl.dsp.exec_cmd("kox clipboard"))
-safe_bind(mainMod .. " + CTRL + V", hl.dsp.exec_cmd("kox clipboard"))
+-- Clipboard history picker (cliphist + fuzzel), Super+V and Super+Ctrl+V.
+-- Absolute path via $HOME: the compositor's PATH is not guaranteed to carry
+-- ~/.local/bin, and a bind that silently fails is worse than no bind. The
+-- picker script is called directly instead of through the kox CLI, so the
+-- bind has exactly one process between it and fuzzel.
+local clipboard_picker = home .. "/.local/bin/kox-pickers/kox-clipboard"
+safe_bind(mainMod .. " + V", hl.dsp.exec_cmd(clipboard_picker))
+safe_bind(mainMod .. " + CTRL + V", hl.dsp.exec_cmd(clipboard_picker))
 
 ------------------
 ---- CAPTURE ------
