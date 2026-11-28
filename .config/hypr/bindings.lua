@@ -141,11 +141,14 @@ if hl.dsp.send_key_state and hl.dispatch and hl.timer then
     end
   end
   safe_bind(mainMod .. " + C", send_once("CTRL", "C"))
-  safe_bind(mainMod .. " + V", send_once("CTRL", "V"))
+  -- Super+V opens the KOX clipboard history; plain paste moves to
+  -- Super+Shift+V so the picker does not steal the paste shortcut.
+  safe_bind(mainMod .. " + SHIFT + V", send_once("CTRL", "V"))
   safe_bind(mainMod .. " + X", send_once("CTRL", "X"))
 end
--- Approx: cliphist+fuzzel picker replaces the Omarchy clipboard panel
-safe_bind(mainMod .. " + CTRL + V", hl.dsp.exec_cmd("cachy-clipboard"))
+-- Clipboard history picker (cliphist + fuzzel), Super+V and Super+Ctrl+V
+safe_bind(mainMod .. " + V", hl.dsp.exec_cmd("kox clipboard"))
+safe_bind(mainMod .. " + CTRL + V", hl.dsp.exec_cmd("kox clipboard"))
 
 ------------------
 ---- CAPTURE ------

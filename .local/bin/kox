@@ -6,7 +6,7 @@
 # config edits. scale/lock exec the owner script so exit codes and signals
 # pass through untouched.
 #
-# Usage: kox <update|scale|lock|doctor|default|theme|wallpaper|bar|cursor|help> [args]
+# Usage: kox <update|scale|lock|clipboard|suspend|doctor|default|theme|wallpaper|bar|cursor|help> [args]
 set -u
 
 VERSION="0.1.0"
@@ -264,6 +264,8 @@ cmd_help() {
 
     printf '\n  %sSESSION%s\n' "$CYAN" "$RESET"
     help_row lock "lock the session (quickshell + PAM)"
+    help_row clipboard "open the clipboard history (cliphist + fuzzel)"
+    help_row suspend "lock and suspend (systemd or OpenRC aware)"
 
     printf '\n  %sDIAGNOSTICS%s\n' "$CYAN" "$RESET"
     help_row doctor "check PipeWire, Bluetooth, Waybar, privileges"
@@ -300,6 +302,14 @@ cmd_scale() {
 
 cmd_lock() {
     kox_exec kox-lock "$@"
+}
+
+cmd_clipboard() {
+    cmd_picker kox-clipboard "$@"
+}
+
+cmd_suspend() {
+    kox_exec kox-suspend "$@"
 }
 
 cmd_picker() { # cmd_picker <tool> [args...] — exec a kox-pickers tool
@@ -738,6 +748,8 @@ main() {
         cursor)          cmd_cursor "$@" ;;
         scale)           cmd_scale "$@" ;;
         lock)            cmd_lock "$@" ;;
+        clipboard)       cmd_clipboard "$@" ;;
+        suspend)         cmd_suspend "$@" ;;
         doctor)          cmd_doctor ;;
         help|-h|--help)  cmd_help ;;
         *)               unknown_command "$cmd" ;;
