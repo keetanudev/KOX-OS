@@ -261,7 +261,7 @@ Direct accent-only palettes (`kox theme blue`, `kox theme pink`) use `themes/<na
 
 | Command | Behaviour |
 | --- | --- |
-| `kox update` | detect the distro, check out `main` (Artix) or `arch-port` (Arch/CachyOS), `sudo pacman -Syu --noconfirm`, `git pull --ff-only origin <branch>`, then `exec bash install.sh` with `KOX_ASSUME_DEFAULTS=1` |
+| `kox update` | detect the distro, check out `main` (Artix) or `arch-port` (Arch/CachyOS), `sudo pacman -Syu --noconfirm`, `git pull --ff-only origin <branch>`, then run `install.sh` with `KOX_ASSUME_DEFAULTS=1` and verify the Hyprland animation runtime |
 | `kox theme [name]` | coverflow picker, or apply a named theme |
 | `kox wallpaper [path]` | coverflow wallpaper picker |
 | `kox cursor` | cursor picker |
@@ -271,7 +271,7 @@ Direct accent-only palettes (`kox theme blue`, `kox theme pink`) use `themes/<na
 | `kox doctor` | PipeWire, Bluetooth, Waybar and privilege checks |
 | `kox help` | command reference |
 
-`kox update` validates before touching the system: git, sudo and pacman present, repo present, `install.sh` present, a known distro (`detect_distro`), and a clean worktree (`git status --porcelain`, including untracked files). It then selects the branch — `main` on Artix, `arch-port` on Arch/CachyOS — before any package or git operation; an unknown distro or a dirty tree aborts without pulling. A failed package update stops before the dotfile pull.
+`kox update` validates before touching the system: git, sudo and pacman present, repo present, `install.sh` present, a known distro (`detect_distro`), and a clean worktree (`git status --porcelain`, including untracked files). It then selects the branch — `main` on Artix, `arch-port` on Arch/CachyOS — before any package or git operation; an unknown distro or a dirty tree aborts without pulling. A failed package update stops before the dotfile pull. After deployment it checks the runtime animation speeds (250 ms windows/workspaces, 200 ms layers), reloads Hyprland once if they are stale, prints any `hyprctl configerrors`, and warns if they still differ.
 
 ### 5.8 Installer and deployment
 
