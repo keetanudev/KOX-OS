@@ -445,11 +445,20 @@ ensure_user_service() {
 # service setup has an explicit offline path.
 # -----------------------------------------------------------------------------
 detect_platform() {
-    [[ -r /etc/os-release ]] || die "Cannot read /etc/os-release."
-    # shellcheck disable=SC1091
-    . /etc/os-release
-    DISTRO_ID="${ID:-}"
-    DISTRO_LIKE="${ID_LIKE:-}"
+    # Same markers as `kox detect_distro`: Artix ships /etc/artix-release,
+    # while Arch and CachyOS are identified through /etc/os-release.
+    DISTRO_ID=""
+    DISTRO_LIKE=""
+    if [[ -e /etc/artix-release ]]; then
+        DISTRO_ID=artix
+    fi
+    if [[ -r /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        DISTRO_ID="${DISTRO_ID:-${ID:-}}"
+        DISTRO_LIKE="${ID_LIKE:-}"
+    fi
+    [[ -n "$DISTRO_ID" ]] || die "Cannot identify the distribution (/etc/artix-release, /etc/os-release)."
 
     # CachyOS sets ID=cachyos with ID_LIKE=arch; match both defensively.
     case "${DISTRO_ID} ${DISTRO_LIKE}" in
