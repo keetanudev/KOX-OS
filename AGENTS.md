@@ -2,7 +2,7 @@
 
 **Read this entire file before changing anything.** It is the persistent brief for OpenCode and any engineer working on KOX OS. When this document and the live system disagree, treat the repo as the source of truth and the live system as the symptom: investigate both before overwriting either.
 
-Last updated: **2026-11-24**. Migration baseline: **`b859001`**; verify current HEAD with `git log`.
+Last updated: **2026-11-28**. Migration baseline: **`b859001`**; verify current HEAD with `git log`.
 
 ---
 
@@ -60,7 +60,7 @@ Target: a fast, self-contained, fresh-installable desktop. Idle RAM budget: **�
 | Current wallpaper | `/home/ved/Pictures/Wallpapers/4.jpg` |
 | Current cursor | `macOS-White` |
 | UI scale | `10` |
-| Baseline bind count | 115 |
+| Baseline bind count | 116 |
 
 The **SATA machine** (`archest`, Arch/CachyOS + systemd, `/dev/sda`) is the dual-init port target: Arch was installed on 2026-11-24 and KOX is deployed from this same repo. The NVMe remains the Artix/OpenRC development box. The SATA’s previous Artix KOX state (`materia`, `#2ec4b6`) is archived under `~/Documents/KOX-OS/sata-state-2026-11-24/`; do not copy it over the NVMe’s current look.
 
@@ -317,6 +317,9 @@ Never replace this with a naive copy. The Emergency Mode incident on 2026-11-22 
 - `autostart.lua` starts two watchers: `wl-paste --type text --watch cliphist store &` and the image twin. `wl-paste --watch` follows one MIME type, so both are needed.
 - `kox clipboard` execs `~/.local/bin/kox-pickers/kox-clipboard`. It lists `cliphist list` (`<id>\t<content>`, newest first), shows the text in fuzzel, and restores the picked entry with `cliphist decode <id> | wl-copy` — `cliphist decode` takes the **id**, not the text.
 - `SUPER + V` opens the history; plain paste moved to `SUPER + SHIFT + V` so the picker does not steal the paste shortcut. `SUPER + CTRL + V` is an alias for the same picker.
+- The bind calls `~/.local/bin/kox-pickers/kox-clipboard` by absolute path (`$HOME` resolved at config load) — not through `PATH`, `~` expansion or the CLI. A bind that silently fails is worse than no bind.
+- **fuzzel 1.15 has no `--preview` pane.** Passing it makes fuzzel exit 1 with `error: --preview: invalid option` — the same exit code as a cancelled picker, so `|| exit 0` swallowed the failure and `SUPER + V` looked like a dead bind. The picker now captures fuzzel's stderr and reports it; only a silent exit is treated as a cancel.
+- `cachy-clipboard` (inherited alias) delegates to `kox-pickers/kox-clipboard`. The old implementation piped the picked *text* into `cliphist decode`, which only accepts an entry *id*.
 
 **Idle management**
 
@@ -413,7 +416,7 @@ bash -n .local/bin/kox-pickers/kox-theme
 Hyprland --verify-config
 hyprctl reload
 hyprctl configerrors          # empty string means clean
-hyprctl binds -j | jq length  # baseline 115
+hyprctl binds -j | jq length  # baseline 116
 ```
 
 For a cross-mounted tree, set `HOME` to the target home before `Hyprland --verify-config`.
