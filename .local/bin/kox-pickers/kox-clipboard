@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# kox-clipboard: clipboard history picker (cliphist + fuzzel).
+#
+# `cliphist list` prints "<id>\t<content>" with newlines flattened to spaces.
+# The untouched entry (newlines intact) is restored with `cliphist decode
+# <id>`, which is what is copied back to the clipboard.
+#
+# The history is filled by the wl-paste watchers started in
+# ~/.config/hypr/autostart.lua.
+set -uo pipefail
+
+if ! command -v cliphist >/dev/null 2>&1; then
+    printf 'kox-clipboard: cliphist is not installed.\n' >&2
+    exit 127
+fi
+if ! command -v fuzzel >/dev/null 2>&1; then
+    printf 'kox-clipboard: fuzzel is not installed.\n' >&2
+    exit 127
+fi
+if ! command -v wl-copy >/dev/null 2>&1; then
+    printf 'kox-clipboard: wl-copy is not installed.\n' >&2
+    exit 127
+fi
+
+mapfile -t raw < <(cliphist list 2>/dev/null)
+if ((${#raw[@]} == 0)); then
+    notify-send "Clipboard" "History is empty" 2>/dev/null || true
+    printf 'kox-clipboard: clipboard history is empty.\n' >&2
+    exit 0
+fi
+
+# Split every entry into its cliphist id and its display text. The id is
+# what `cliphist decode` needs; the text is what the user picks.
+ids=()
+labels=()
+for entry in "${raw[@]}"; do
+    id="${entry%%$'\t'*}"
+    content="${entry#*$'\t'}"
+    [[ -n $content ]] || continue
+    ids+=("$id")
+    labels+=("$content")
+done
+
+if ((${#labels[@]} == 0)); then
+    printf 'kox-clipboard: clipboard history has no usable entries.\n' >&2
+    exit 0
+fi
+
+selection="$(
+    printf '%s\n' "${labels[@]}" |
+        fuzzel --dmenu --prompt 'Clipboard > ' --preview 'echo {}'
+)" || exit 0
+[[ -n $selection ]] || exit 0
+
+# Map the picked text back to its cliphist id.
+id=""
+for i in "${!labels[@]}"; do
+    if [[ "${labels[$i]}" == "$selection" ]]; then
+        id="${ids[$i]}"
+        break
+    fi
+done
+[[ -n $id ]] || exit 0
+
+# Restore the original entry (multi-line content included).
+cliphist decode "$id" | wl-copy

@@ -52,4 +52,11 @@ hl.on("hyprland.start", function()
 
     -- Wallpaper daemon
     hl.exec_cmd("hyprpaper")
+
+    -- Clipboard history: watch the Wayland clipboard and store every change
+    -- in cliphist. Two watchers are needed because wl-paste --watch follows
+    -- a single MIME type; the picker (kox clipboard) restores an entry with
+    -- `cliphist decode`.
+    hl.exec_cmd("wl-paste --type text --watch cliphist store &")
+    hl.exec_cmd("wl-paste --type image --watch cliphist store &")
 end)
